@@ -35,6 +35,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     parser = _add_autoresume_args(parser)
     parser = _add_biencoder_args(parser)
     parser = _add_vision_args(parser)
+    parser = _add_hyena_args(parser)
     parser = _add_logging_args(parser)
     parser = _add_inference_args(parser)
     parser = _add_transformer_engine_args(parser)
@@ -588,6 +589,56 @@ def _add_network_size_args(parser):
                        help='Untie embeddings and output weights.'),
     group.add_argument('--embedding-weights-in-fp32', action='store_true',
                        help='Cast word embedding weights to fp32 before embedding fwd.'),
+    return parser
+
+
+def _add_hyena_args(parser):
+    group = parser.add_argument_group(title='Hyena')
+
+    group.add_argument('--use-hyena', action='store_true',
+                       help='Whether to replace attention layers with Hyenas.')
+    # group.add_argument('--hyena-order', type=int, default=2,
+    #                    help='Number of Hyena output projections.')
+    group.add_argument('--hyena-filter-order', type=int, default=64,
+                       help='Width of the Hyena implicit filter FFN.')
+    group.add_argument('--hyena-dropout', type=float, default=0.0,
+                       help='Dropout before applying Hyena filter.')
+    group.add_argument('--hyena-filter-dropout', type=float, default=0.0,
+                       help='NO EFFECT.')
+    group.add_argument('--hyena-emb-dim', type=int, default=3,
+                       help='Embedding dimension of the Hyena positional '
+                       'encoding.')
+    group.add_argument('--hyena-gating-activation', type=str, default='identity',
+                       help='Frequency for the Hyena implicit filter '
+                       'activations.')
+    group.add_argument('--hyena-short-conv-size', type=int, default=3,
+                       help='Size of the short convolution kernel.')
+    group.add_argument('--hyena-activation-frequency', type=float, default=1.0,
+                       help='Frequency for the Hyena implicit filter '
+                       'activations.')
+    group.add_argument('--hyena-pos-emb-frequency', type=float, default=1.0,
+                       help='Frequency for the Hyena positional embedding '
+                       'activations.')
+    group.add_argument('--hyena-weight-decay', type=float, default=0.0,
+                       help='Weight decay for the Hyena implicit filter '
+                       'parameters.')
+    group.add_argument('--hyena-num-inner-mlps', type=int, default=2,
+                       help='Number of linear layers for Hyena implicit '
+                       'filter.')
+    group.add_argument('--hyena-normalized', action='store_true',
+                       help='Whether to normalize the Hyena filter.')
+    group.add_argument('--hyena-fast-decay-pct', type=float, default=0.3,
+                       help='Inverse scale of maximum Hyena modulation decay.')
+    group.add_argument('--hyena-slow-decay-pct', type=float, default=1.5,
+                       help='Inverse scale of minimum Hyena modulation decay.')
+    group.add_argument('--hyena-modulation-target', type=float, default=1e-2,
+                       help='Hyena modulation target decay value.')
+    group.add_argument('--hyena-no-modulate', action='store_false',
+                       help='Whether to apply modulation to Hyena.',
+                       dest='hyena_modulate')
+    group.add_argument('--hyena-shift', type=float, default=0.0,
+                       help='How much to shift/delay the Hyena decay signal.')
+
     return parser
 
 
