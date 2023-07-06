@@ -34,6 +34,11 @@ try:
 except ImportError:
     flash_attn_unpadded_func = None
 
+try:
+    from megatron.model.triton_flash_attn import triton_flash_attn_fn
+except ImportError:
+    triton_flash_attn_fn = None
+
 
 """ We use the following notation throughout this file:
      h: hidden size
@@ -371,12 +376,14 @@ class FlashSelfAttention(torch.nn.Module):
         self.softmax_scale = softmax_scale
         self.dropout_p = attention_dropout
 
-    def forward(self, q, k, v):
+    def forward(self, q, k, v, attn_bias=None):
         """Implements the multihead softmax attention.
         Arguments
         ---------
             q, k, v: The tensor containing the query, key, and value. (B, S, H, D)
         """
+        assert attn_bias is None, \
+            'FlashAttention does not support attention bias'
 
         assert all((i.dtype in [torch.float16, torch.bfloat16] for i in (q,k,v)))
         assert all((i.is_cuda for i in (q,k,v)))
@@ -408,6 +415,41 @@ class FlashSelfAttention(torch.nn.Module):
             softmax_scale=self.softmax_scale, causal=is_causal
         )
 
+        output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
+        return output
+
+
+class TritonFlashSelfAttention(torch.nn.Module):
+    """Implement the scaled dot product attention with softmax.
+
+    Arguments
+    ---------
+        softmax_scale: The temperature to use for the softmax attention.
+                      (default: 1/sqrt(d_keys) where d_keys is computed at
+                      runtime)
+        attention_dropout: The dropout rate to apply to the attention
+                           (default: 0.0)
+    """
+
+    def __init__(self, nhead_per_partition, causal=False, softmax_scale=None,
+                 attention_dropout=0.0, device=None, dtype=None):
+        super().__init__()
+        assert triton_flash_attn_fn is not None
+        assert rearrange is not None, \
+            'Please install `einops` first, e.g., with `pip install einops`.'
+        self.nhead_per_partition = nhead_per_partition
+        self.causal = causal
+        self.softmax_scale = softmax_scale
+        self.dropout_p = attention_dropout
+
+    def forward(self, q, k, v, attn_bias=None):
+        batch_size = q.size(0)
+
+        output = triton_flash_attn_fn(
+            q, k, v, self.nhead_per_partition, attn_bias=attn_bias,
+            softmax_scale=self.softmax_scale, training=self.training,
+            dropout_p=self.dropout_p, is_causal=self.causal,
+        )
         output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
         return output
 
@@ -486,9 +528,15 @@ class ParallelAttention(MegatronModule):
         self.checkpoint_core_attention = config.recompute_granularity == 'selective'
 
         if self.use_flash_attn:
-            self.core_attention_flash = FlashSelfAttention(
-                causal=True, attention_dropout=config.attention_dropout
-            )
+            if args.position_embedding_type == PositionEmbeddingType.alibi:
+                self.core_attention_flash = TritonFlashSelfAttention(
+                    nhead_per_partition=self.num_attention_heads_per_partition,
+                    causal=True, attention_dropout=config.attention_dropout,
+                )
+            else:
+                self.core_attention_flash = FlashSelfAttention(
+                    causal=True, attention_dropout=config.attention_dropout
+                )
 
         # Output.
         self.dense = tensor_parallel.RowParallelLinear(
@@ -677,9 +725,11 @@ class ParallelAttention(MegatronModule):
                        for x in (query_layer, key_layer, value_layer)]
             if not self.sequence_parallel:
                 with tensor_parallel.get_cuda_rng_tracker().fork():
-                    context_layer = self.core_attention_flash(q, k, v)
+                    context_layer = self.core_attention_flash(
+                        q, k, v, attn_bias=alibi)
             else:
-                context_layer = self.core_attention_flash(q, k, v)
+                context_layer = self.core_attention_flash(
+                    q, k, v, attn_bias=alibi)
             context_layer = rearrange(context_layer, 'b s h d -> s b (h d)').contiguous()
 
         # =================
@@ -797,8 +847,6 @@ class ParallelTransformerLayer(MegatronModule):
 
         # ALiBi
         if args.position_embedding_type == PositionEmbeddingType.alibi:
-            assert not args.use_flash_attn, \
-                'ALiBi does not work with FlashAttention currently'
             self.alibi = self._build_alibi_tensor(
                 args.seq_length,
                 args.num_attention_heads,
