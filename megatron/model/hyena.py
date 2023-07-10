@@ -407,7 +407,7 @@ class ParallelHyena(MegatronModule):
         self.long_conv_bias = torch.nn.Parameter(torch.empty(
             hidden_size_per_partition,
             device=torch.cuda.current_device(),
-            dtype=torch.float32,
+            dtype=args.params_dtype,
         ))
 
     def forward(self, query_layer, key_layer, value_layer):
@@ -446,7 +446,7 @@ class ParallelHyena(MegatronModule):
             z = fftconv(
                 z.to(torch.float32),
                 filter.to(torch.float32),
-                self.long_conv_bias,
+                self.long_conv_bias.to(torch.float32),
                 None,
                 gelu=False,
             )
