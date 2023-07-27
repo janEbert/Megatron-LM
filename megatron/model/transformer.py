@@ -519,6 +519,18 @@ class ParallelAttention(MegatronModule):
             and attention_type == AttnType.self_attn \
             and self.attn_mask_type == AttnMaskType.causal
         if self.use_flash_attn:
+            assert (
+                # If we have GPT pretraining, we can use the Triton
+                # kernel and don't need to care about attention mask
+                # modifications.
+                hasattr(args, '_is_gpt') and args._is_gpt
+                # If we can't use the Triton kernel, we also cannot
+                # accept these arguments that modify the attention mask.
+                or (
+                    not args.reset_position_ids
+                    and not args.reset_attention_mask
+                )
+            )
             if flash_attn_unpadded_func is None:
                 raise ImportError('FlashAttention is not installed, please install with '
                                   'pip install flash-attn')
