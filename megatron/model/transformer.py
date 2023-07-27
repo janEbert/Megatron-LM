@@ -583,7 +583,11 @@ class ParallelAttention(MegatronModule):
         self.checkpoint_core_attention = config.recompute_granularity == 'selective'
 
         if self.use_flash_attn:
-            if args.position_embedding_type == PositionEmbeddingType.alibi:
+            if (
+                    args.position_embedding_type == PositionEmbeddingType.alibi
+                    or args.reset_position_ids
+                    or args.reset_attention_mask
+            ):
                 self.core_attention_flash = TritonFlashSelfAttention(
                     nhead_per_partition=self.num_attention_heads_per_partition,
                     causal=True, attention_dropout=config.attention_dropout,
