@@ -393,7 +393,7 @@ class FlashSelfAttention(torch.nn.Module):
             and flash_attn_func is not None
         )
 
-    def forward(self, q, k, v, attn_mask=None):
+    def forward(self, q, k, v, attn_mask=None, alibi=None):
         """Implements the multihead softmax attention.
         Arguments
         ---------
@@ -401,6 +401,8 @@ class FlashSelfAttention(torch.nn.Module):
         """
         assert attn_mask is None, \
             'FlashAttention does not support arbitrary attention masks'
+        assert alibi is None, \
+            'FlashAttention does not support ALiBi'
 
         q, k, v = [rearrange(x, 's b ... -> b s ...').contiguous()
                    for x in (q, k, v)]
@@ -482,7 +484,12 @@ class TritonFlashSelfAttention(torch.nn.Module):
         self.softmax_scale = softmax_scale
         self.dropout_p = attention_dropout
 
-    def forward(self, q, k, v, attn_mask=None):
+    def forward(self, q, k, v, attn_mask=None, alibi=None):
+        if attn_mask is None:
+            attn_mask = alibi
+        elif alibi is not None:
+            attn_mask = attn_mask + alibi
+
         q, k, v = [rearrange(x, 's b h d -> b h s d').contiguous()
                    for x in (q, k, v)]
 
@@ -784,11 +791,11 @@ class ParallelAttention(MegatronModule):
                 with tensor_parallel.get_cuda_rng_tracker().fork():
                     context_layer = self.core_attention_flash(
                         query_layer, key_layer, value_layer,
-                        attn_mask=attention_mask + alibi)
+                        attn_mask=attention_mask, alibi=alibi)
             else:
                 context_layer = self.core_attention_flash(
                     query_layer, key_layer, value_layer,
-                    attn_mask=attention_mask + alibi)
+                    attn_mask=attention_mask, alibi=alibi)
 
         # =================
         # Output. [sq, b, h]
