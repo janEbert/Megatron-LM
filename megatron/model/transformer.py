@@ -468,7 +468,13 @@ class TritonFlashSelfAttention(torch.nn.Module):
     def __init__(self, nhead_per_partition, causal=False, softmax_scale=None,
                  attention_dropout=0.0, device=None, dtype=None):
         super().__init__()
-        assert triton_flash_attn is not None
+        assert triton_flash_attn is not None, (
+            'Please install `triton` with support for FlashAttention with '
+            'attention masks first, e.g., with `pip install '
+            'git+https://github.com/janEbert/triton.git@attn-mask`.'
+        )
+        assert rearrange is not None, \
+            'Please install `einops` first, e.g., with `pip install einops`.'
         assert attention_dropout == 0, \
             'Triton FlashAttention currently does not support dropout.'
         self.nhead_per_partition = nhead_per_partition
