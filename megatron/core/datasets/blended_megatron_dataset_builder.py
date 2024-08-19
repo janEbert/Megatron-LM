@@ -394,7 +394,7 @@ class BlendedMegatronDatasetBuilder(object):
             if split[i] is not None:
                 beg = int(round(split[i][0] * float(num_elements)))
                 end = int(round(split[i][1] * float(num_elements)))
-                split_indices.append(numpy.arange(start=beg, stop=end, step=1, dtype=numpy.int32))
+                split_indices.append(numpy.arange(start=beg, stop=end, step=1, dtype=numpy.int64))
             else:
                 split_indices.append(None)
 
