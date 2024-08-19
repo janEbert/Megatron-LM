@@ -4,6 +4,7 @@ import hashlib
 import json
 from abc import ABC, abstractmethod
 from collections import OrderedDict
+import os
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 import numpy
@@ -44,7 +45,20 @@ class MegatronDataset(ABC, torch.utils.data.Dataset):
     ) -> None:
         self.dataset = dataset
         self.dataset_path = dataset_path
-        self.indices = indices
+
+        path_to_cache = config.path_to_cache
+        indices_hash = hashlib.md5(indices).hexdigest()
+        self.path_to_cache_indices = os.path.join(
+            path_to_cache,
+            f"{os.path.basename(self.dataset_path)}_indices_{indices_hash}.npy",
+        )
+        os.makedirs(os.path.dirname(self.path_to_cache_indices), exist_ok=True)
+        numpy.save(
+            self.path_to_cache_indices,
+            indices,
+            allow_pickle=True,
+        )
+        self.indices = numpy.load(self.path_to_cache_indices, allow_pickle=True, mmap_mode='r')
         self.num_samples = num_samples
         self.index_split = index_split
         self.config = config
