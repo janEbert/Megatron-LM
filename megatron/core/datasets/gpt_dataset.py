@@ -4,7 +4,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy
 import torch
@@ -104,6 +104,32 @@ class GPTDataset(MegatronDataset):
         except:
             self._pad_token_id = _PAD_TOKEN_ID
 
+        (
+            self.document_index,
+            self.sample_index,
+            self.shuffle_index,
+        ) = self._build_document_sample_shuffle_indices()
+
+    def __getstate__(self) -> Dict[str, Any]:
+        """Get the state during pickling
+
+        Returns:
+            Dict[str, Any]
+        """
+        state = self.__dict__.copy()
+        state.pop("document_index", None)
+        state.pop("sample_index", None)
+        state.pop("shuffle_index", None)
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        """Set the state during un-pickling
+
+        Args:
+            state (Dict[str, Any]): The state dict
+        """
+        for (k, v) in state.items():
+            self.__dict__[k] = v
         (
             self.document_index,
             self.sample_index,

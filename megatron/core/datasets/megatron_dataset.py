@@ -79,6 +79,26 @@ class MegatronDataset(ABC, torch.utils.data.Dataset):
             self.unique_description.encode("utf-8")
         ).hexdigest()
 
+    def __getstate__(self) -> Dict[str, Any]:
+        """Get the state during pickling
+
+        Returns:
+            Dict[str, Any]
+        """
+        state = self.__dict__.copy()
+        state.pop('indices')
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]):
+        """Set the state during un-pickling
+
+        Args:
+            state (Dict[str, Any]): The state dict
+        """
+        for (k, v) in state.items():
+            self.__dict__[k] = v
+        self.indices = numpy.load(self.path_to_cache_indices, allow_pickle=True, mmap_mode='r')
+
     @staticmethod
     def numel_low_level_dataset(low_level_dataset: LowLevelDataset) -> int:
         """Return the number of elements in the underlying low level dataset for the purpose of

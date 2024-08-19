@@ -6,7 +6,7 @@ import logging
 import os
 import time
 from collections import OrderedDict
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy
 import torch
@@ -81,6 +81,27 @@ class BlendedDataset(torch.utils.data.Dataset):
             self.unique_description.encode("utf-8")
         ).hexdigest()
 
+        self.dataset_index, self.dataset_sample_index = self._build_indices()
+
+    def __getstate__(self) -> Dict[str, Any]:
+        """Get the state during pickling
+
+        Returns:
+            Dict[str, Any]
+        """
+        state = self.__dict__.copy()
+        state.pop("dataset_index", None)
+        state.pop("dataset_sample_index", None)
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        """Set the state during un-pickling
+
+        Args:
+            state (Dict[str, Any]): The state dict
+        """
+        for (k, v) in state.items():
+            self.__dict__[k] = v
         self.dataset_index, self.dataset_sample_index = self._build_indices()
 
     def __len__(self) -> int:
