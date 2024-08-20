@@ -62,6 +62,7 @@ class MegatronDataset(ABC, torch.utils.data.Dataset):
                 )
             self.indices = numpy.load(self.path_to_cache_indices, allow_pickle=True, mmap_mode='r')
         else:
+            self.path_to_cache_indices = None
             self.indices = indices
         self.num_samples = num_samples
         self.index_split = index_split
@@ -103,7 +104,7 @@ class MegatronDataset(ABC, torch.utils.data.Dataset):
         for (k, v) in state.items():
             self.__dict__[k] = v
         if self.config.path_to_cache:
-            assert os.path.isfile(self.path_to_cache_indices), \
+            assert self.path_to_cache_indices and os.path.isfile(self.path_to_cache_indices), \
                 "data is not present in cache; cannot load pickle."
             self.indices = numpy.load(self.path_to_cache_indices, allow_pickle=True, mmap_mode='r')
 
