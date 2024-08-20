@@ -48,17 +48,21 @@ class MegatronDataset(ABC, torch.utils.data.Dataset):
 
         path_to_cache = config.path_to_cache
         indices_hash = hashlib.md5(indices).hexdigest()
-        self.path_to_cache_indices = os.path.join(
-            path_to_cache,
-            f"{os.path.basename(self.dataset_path)}_indices_{indices_hash}.npy",
-        )
-        os.makedirs(os.path.dirname(self.path_to_cache_indices), exist_ok=True)
-        numpy.save(
-            self.path_to_cache_indices,
-            indices,
-            allow_pickle=True,
-        )
-        self.indices = numpy.load(self.path_to_cache_indices, allow_pickle=True, mmap_mode='r')
+        if path_to_cache:
+            self.path_to_cache_indices = os.path.join(
+                path_to_cache,
+                f"{os.path.basename(self.dataset_path)}_super_document_indices_{indices_hash}.npy",
+            )
+            if not os.path.isfile(self.path_to_cache_indices):
+                os.makedirs(os.path.dirname(self.path_to_cache_indices), exist_ok=True)
+                numpy.save(
+                    self.path_to_cache_indices,
+                    indices,
+                    allow_pickle=True,
+                )
+            self.indices = numpy.load(self.path_to_cache_indices, allow_pickle=True, mmap_mode='r')
+        else:
+            self.indices = indices
         self.num_samples = num_samples
         self.index_split = index_split
         self.config = config
@@ -86,7 +90,8 @@ class MegatronDataset(ABC, torch.utils.data.Dataset):
             Dict[str, Any]
         """
         state = self.__dict__.copy()
-        state.pop('indices')
+        if self.config.path_to_cache:
+            state.pop('indices')
         return state
 
     def __setstate__(self, state: Dict[str, Any]):
@@ -97,7 +102,10 @@ class MegatronDataset(ABC, torch.utils.data.Dataset):
         """
         for (k, v) in state.items():
             self.__dict__[k] = v
-        self.indices = numpy.load(self.path_to_cache_indices, allow_pickle=True, mmap_mode='r')
+        if self.config.path_to_cache:
+            assert os.path.isfile(self.path_to_cache_indices), \
+                "data is not present in cache; cannot load pickle."
+            self.indices = numpy.load(self.path_to_cache_indices, allow_pickle=True, mmap_mode='r')
 
     @staticmethod
     def numel_low_level_dataset(low_level_dataset: LowLevelDataset) -> int:
