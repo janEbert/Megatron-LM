@@ -299,6 +299,23 @@ class _IndexReader(object):
             f"> total number of documents: {self.document_indices.shape[0] - 1}",
         )
 
+    def __getstate__(self) -> Tuple[str, bool]:
+        """Get the state during pickling
+
+        Returns:
+            Tuple[str, bool]: The state tuple
+        """
+        return (self.idx_path, self.multimodal)
+
+    def __setstate__(self, state: Tuple[str, bool]) -> None:
+        """Set the state during un-pickling
+
+        Args:
+            state (Tuple[str, bool]): The state tuple
+        """
+        idx_path, multimodal = state
+        self.__init__(idx_path, multimodal)
+
     def __del__(self) -> None:
         """Clean up the object
         """
