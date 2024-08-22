@@ -83,6 +83,16 @@ class BlendedDataset(torch.utils.data.Dataset):
 
         self.dataset_index, self.dataset_sample_index = self._build_indices()
 
+        # Are all subdatasets cache-able?
+        self.masks_and_position_ids_are_cacheable = all(
+                (
+                    hasattr(dataset, "masks_and_position_ids_are_cacheable")
+                    and dataset.masks_and_position_ids_are_cacheable
+                )
+                for dataset in self.datasets
+        )
+        self.masks_and_position_ids_are_cached = False
+
     def __getstate__(self) -> Dict[str, Any]:
         """Get the state during pickling
 
@@ -90,6 +100,8 @@ class BlendedDataset(torch.utils.data.Dataset):
             Dict[str, Any]
         """
         state = self.__dict__.copy()
+        state.pop("masks_and_position_ids_are_cached", None)
+
         state.pop("dataset_index", None)
         state.pop("dataset_sample_index", None)
         return state
@@ -102,6 +114,8 @@ class BlendedDataset(torch.utils.data.Dataset):
         """
         for (k, v) in state.items():
             self.__dict__[k] = v
+        self.masks_and_position_ids_are_cached = False
+
         self.dataset_index, self.dataset_sample_index = self._build_indices()
 
     def __len__(self) -> int:
@@ -110,10 +124,25 @@ class BlendedDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Union[int, numpy.ndarray]]:
         dataset_id = self.dataset_index[idx]
         dataset_sample_id = self.dataset_sample_index[idx]
-        return {
+        dataset = self.datasets[dataset_id]
+
+        result = {
             "dataset_id": dataset_id,
-            **self.datasets[dataset_id][dataset_sample_id],
+            **dataset[dataset_sample_id],
         }
+
+        # Re-use the same cache tensor for all datasets.
+        if (
+            self.masks_and_position_ids_are_cacheable
+            and not self.masks_and_position_ids_are_cached
+        ):
+            for other_dataset in self.datasets:
+                other_dataset.cached_attention_mask = dataset.cached_attention_mask
+                other_dataset.cached_loss_mask = dataset.cached_loss_mask
+                other_dataset.cached_position_ids = dataset.cached_position_ids
+            self.masks_and_position_ids_are_cached = True
+
+        return result
 
     def _build_indices(self) -> Tuple[numpy.ndarray, numpy.ndarray]:
         """Build and optionally cache the dataset index and the dataset sample index
