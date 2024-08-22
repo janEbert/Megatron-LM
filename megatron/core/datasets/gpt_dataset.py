@@ -117,6 +117,11 @@ class GPTDataset(MegatronDataset):
             Dict[str, Any]
         """
         state = self.__dict__.copy()
+        state.pop("cached_attention_mask", None)
+        state.pop("cached_loss_mask", None)
+        state.pop("cached_position_ids", None)
+        state.pop("masks_and_position_ids_are_cached", None)
+
         state.pop("document_index", None)
         state.pop("sample_index", None)
         state.pop("shuffle_index", None)
@@ -130,6 +135,11 @@ class GPTDataset(MegatronDataset):
         """
         for (k, v) in state.items():
             self.__dict__[k] = v
+        self.cached_attention_mask = None
+        self.cached_loss_mask = None
+        self.cached_position_ids = None
+        self.masks_and_position_ids_are_cached = False
+
         (
             self.document_index,
             self.sample_index,
