@@ -136,6 +136,15 @@ class BlendedDataset(torch.utils.data.Dataset):
             self.masks_and_position_ids_are_cacheable
             and not self.masks_and_position_ids_are_cached
         ):
+            assert all(
+                cache_value is not None
+                for cache_value in (
+                        dataset.cached_attention_mask,
+                        dataset.cached_loss_mask,
+                        dataset.cached_position_ids,
+                )
+            ), 'a value that was expected to be cached was not populated.'
+
             for other_dataset in self.datasets:
                 other_dataset.cached_attention_mask = dataset.cached_attention_mask
                 other_dataset.cached_loss_mask = dataset.cached_loss_mask
