@@ -116,7 +116,7 @@ class GPTDataset(MegatronDataset):
         Returns:
             Dict[str, Any]
         """
-        state = self.__dict__.copy()
+        state = super().__getstate__()
         state.pop("cached_attention_mask", None)
         state.pop("cached_loss_mask", None)
         state.pop("cached_position_ids", None)
@@ -133,8 +133,7 @@ class GPTDataset(MegatronDataset):
         Args:
             state (Dict[str, Any]): The state dict
         """
-        for (k, v) in state.items():
-            self.__dict__[k] = v
+        super().__setstate__(state)
         self.cached_attention_mask = None
         self.cached_loss_mask = None
         self.cached_position_ids = None
