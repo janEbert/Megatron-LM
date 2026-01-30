@@ -880,6 +880,9 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             else:
                 raise NotImplementedError(f'Unknown sharding_type: {sharding_type}')
 
+        # Verify optimizer state tensors are on the expected device after loading.
+        self._verify_optimizer_state_device()
+
     def _get_main_param_and_optimizer_states(self, model_param):
         """Return a dict containing the main param and optimizer states corresponding to the input
         model_param.
@@ -938,6 +941,36 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             dst_tensors = {"param": main_param, **optim_state}
             for key in dst_tensors:
                 dst_tensors[key].copy_(tensors[key])
+
+    def _verify_optimizer_state_device(self):
+        """Verify that all optimizer state tensors are on the expected CUDA device.
+
+        This method guards against bugs where optimizer state tensors are incorrectly
+        allocated on CPU during checkpoint loading (e.g., in load_state_dict when
+        creating dummy tensors).
+
+        Raises:
+            AssertionError: If any optimizer state tensor is not on the expected CUDA device.
+        """
+        # Skip verification for HybridDeviceOptimizer, which legitimately keeps
+        # some optimizer states on CPU for memory offloading.
+        if isinstance(self.optimizer, HybridDeviceOptimizer):
+            return
+
+        expected_device = torch.device(torch.cuda.current_device())
+        for param_group in self.optimizer.param_groups:
+            for param in param_group["params"]:
+                if param not in self.optimizer.state:
+                    continue
+                state = self.optimizer.state[param]
+                for state_name, state_tensor in state.items():
+                    if isinstance(state_tensor, torch.Tensor) and state_tensor.numel() > 0:
+                        assert state_tensor.device == expected_device, (
+                            f"Optimizer state '{state_name}' for param in group should be on "
+                            f"device {expected_device}, but found on {state_tensor.device}. "
+                            f"This may indicate a bug in checkpoint loading where tensors were "
+                            f"incorrectly allocated on the wrong device."
+                        )
 
     def get_parameter_state_dp_reshardable(self):
         """Get internal representation of parameter state without any copies and modifications.

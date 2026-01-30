@@ -458,6 +458,69 @@ class TestDistributedOptimizer:
 
         Utils.destroy_model_parallel()
 
+    @pytest.mark.parametrize("tp_pp", [(2, 2), (1, 4)])
+    def test_optimizer_state_device_after_load(self, tmp_path_dist_ckpt, tp_pp):
+        """Test that optimizer state tensors remain on the correct CUDA device after checkpoint
+        load.
+
+        This test guards against bugs where optimizer state tensors are incorrectly
+        allocated on CPU during checkpoint loading (e.g., when creating dummy tensors
+        in load_state_dict).
+        """
+        tp, pp = tp_pp
+        Utils.initialize_model_parallel(
+            tensor_model_parallel_size=tp,
+            pipeline_model_parallel_size=pp,
+        )
+
+        with TempNamedDir(
+            tmp_path_dist_ckpt / 'test_optimizer_state_device_after_load', sync=True
+        ) as ckpt_dir:
+            mock_args = parse_args(ignore_unknown_args=True)
+            mock_args.use_distributed_optimizer = True
+            with mock.patch('megatron.training.checkpointing.get_args', new=lambda: mock_args):
+                # Initialize model and optimizer A.
+                model, optimizer_A = setup_model_and_optimizer(seed=2, tp=tp, pp=pp)
+
+                # Save checkpoint.
+                init_checkpointing_mock_args(mock_args, ckpt_dir, fully_parallel=False)
+                from megatron.training.training import preprocess_common_state_dict
+
+                save_checkpoint(
+                    10,
+                    model,
+                    optimizer_A,
+                    None,
+                    0,
+                    preprocess_common_state_dict_fn=preprocess_common_state_dict,
+                )
+
+                # Initialize model and optimizer B (fresh, with different seed).
+                model, optimizer_B = setup_model_and_optimizer(seed=3, tp=tp, pp=pp)
+
+                # Clear optimizer state to force dummy tensor allocation during load.
+                # This exercises the code path in `load_state_dict`, in
+                # which dummy tensors are allocated.
+                for chained_opt in optimizer_B.chained_optimizers:
+                    chained_opt.optimizer.state.clear()
+
+                # Load checkpoint into optimizer B.
+                load_checkpoint_no_arg_checks(model, optimizer_B, None)
+
+                # Verify all optimizer state tensors are on the expected CUDA device.
+                expected_device = torch.device(torch.cuda.current_device())
+                for chained_opt in optimizer_B.chained_optimizers:
+                    inner_optimizer = chained_opt.optimizer
+                    for param_state in inner_optimizer.state.values():
+                        for state_name, state_tensor in param_state.items():
+                            if isinstance(state_tensor, torch.Tensor) and state_tensor.numel() > 0:
+                                assert state_tensor.device == expected_device, (
+                                    f"Optimizer state '{state_name}' should be on device "
+                                    f"{expected_device}, but found on {state_tensor.device}"
+                                )
+
+        Utils.destroy_model_parallel()
+
     @pytest.mark.parametrize(
         ('src_tp_pp', 'dest_tp_pp', 'use_glu'),
         [((2, 2), (2, 4), False), ((1, 8), (4, 1), True), ((2, 4), (4, 2), False)],
