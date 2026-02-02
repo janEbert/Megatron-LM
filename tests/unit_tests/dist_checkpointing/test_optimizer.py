@@ -459,6 +459,46 @@ class TestDistributedOptimizer:
         Utils.destroy_model_parallel()
 
     @pytest.mark.parametrize("tp_pp", [(2, 2), (1, 4)])
+    def test_optimizer_dummy_tensor_device_allocation(self, tmp_path_dist_ckpt, tp_pp):
+        """Test that dummy tensors in load_state_dict are allocated on CUDA device."""
+        tp, pp = tp_pp
+        Utils.initialize_model_parallel(
+            tensor_model_parallel_size=tp,
+            pipeline_model_parallel_size=pp,
+        )
+
+        mock_args = parse_args(ignore_unknown_args=True)
+        mock_args.use_distributed_optimizer = True
+        with mock.patch('megatron.training.checkpointing.get_args', new=lambda: mock_args):
+            # Initialize model and optimizer
+            model, optimizer = setup_model_and_optimizer(seed=2, tp=tp, pp=pp)
+
+            # Get a valid state_dict to use for loading
+            state_dict = optimizer.chained_optimizers[0].state_dict()
+
+            # Clear optimizer state to force dummy tensor allocation
+            for chained_opt in optimizer.chained_optimizers:
+                chained_opt.optimizer.state.clear()
+
+            # Call load_state_dict directly
+            # This should allocate dummy tensors and call _verify_optimizer_state_device
+            optimizer.chained_optimizers[0].load_state_dict(state_dict)
+
+            # Verify all optimizer state tensors are on the expected CUDA device
+            expected_device = torch.device(torch.cuda.current_device())
+            for chained_opt in optimizer.chained_optimizers:
+                inner_optimizer = chained_opt.optimizer
+                for param_state in inner_optimizer.state.values():
+                    for state_name, state_tensor in param_state.items():
+                        if isinstance(state_tensor, torch.Tensor) and state_tensor.numel() > 0:
+                            assert state_tensor.device == expected_device, (
+                                f"Optimizer state '{state_name}' should be on device "
+                                f"{expected_device}, but found on {state_tensor.device}"
+                            )
+
+        Utils.destroy_model_parallel()
+
+    @pytest.mark.parametrize("tp_pp", [(2, 2), (1, 4)])
     def test_optimizer_state_device_after_load(self, tmp_path_dist_ckpt, tp_pp):
         """Test that optimizer state tensors remain on the correct CUDA device after checkpoint
         load.
