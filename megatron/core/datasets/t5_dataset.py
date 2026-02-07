@@ -15,6 +15,7 @@ from megatron.core.datasets.masked_dataset import (
     MaskedWordPieceDatasetConfig,
 )
 from megatron.core.datasets.utils import Split
+from megatron.core.tokenizers import MegatronTokenizerBase
 from megatron.core.utils import get_te_version
 
 
@@ -338,3 +339,146 @@ class T5MaskedWordPieceDataset(MaskedWordPieceDataset):
             int: The mask token id
         """
         return self.config.tokenizer.mask
+
+
+class MockT5LowLevelMaskedWordPieceDataset:
+    """The mock T5 low level dataset
+
+    This class is meant to generate tokenized data in the classic "Megatron-LM" T5 style.
+
+    Args:
+        tokenizer (MegatronTokenizerBase): The tokenizer the special token information of which
+        we use to augment the mock data.
+    """
+
+    seed: int = 0
+    """The hard-coded random seed to use to set the NumPy RNG"""
+
+    size: int = 100000
+    """The hard-coded number of samples to generate"""
+
+    max_sequence_length: int = 4096
+    """The hard-coded max sequence length of the random generated sequences"""
+
+    def __init__(self, tokenizer: MegatronTokenizerBase) -> None:
+        self.vocab_size = tokenizer.vocab_size
+        rng = numpy.random.default_rng(seed=self.seed)
+        self.sequence_lengths = rng.integers(
+            low=1, high=self.max_sequence_length, size=self.size, dtype=numpy.int32
+        )
+
+    def __len__(self) -> int:
+        return self.size
+
+    def __getitem__(self, idx: int) -> numpy.number:
+        length = self.sequence_lengths[idx]
+        sample = (numpy.arange(length, dtype=numpy.int64) + 1) % self.vocab_size
+        return sample
+
+    def get(self, idx: int, offset: int = 0, length: Optional[int] = None) -> numpy.ndarray:
+        """This function is an abstraction over __getitem__ with support for slicing
+
+        Args:
+            idx (int): The index into the dataset
+
+            offset (int): The integer token offset in the sequence
+
+            length (Optional[int]): The number of tokens to grab from the sequence
+
+        Returns:
+            numpy.ndarray: The sequence tokens at the index
+        """
+        if length is None:
+            length = self.sequence_lengths[idx] - offset
+        return self[idx][offset : offset + length]
+
+
+class MockT5MaskedWordPieceDataset(T5MaskedWordPieceDataset):
+    """The mock T5 dataset
+
+    Args:
+        indexed_dataset (IndexedDataset): The IndexedDataset around
+            which to build the MegatronDataset
+
+        dataset_path (str): The real path on disk to the dataset, for bookkeeping
+
+        indexed_indices (numpy.ndarray): The set of the documents indices to expose
+
+        num_samples (Optional[int]): The number of samples to draw from the indexed
+            dataset. When None, build as many samples as correspond to one epoch.
+
+        index_split (Split): The indexed_indices Split
+
+        config (T5MaskedWordPieceDatasetConfig): The config
+    """
+
+    def __init__(
+        self,
+        dataset: MockT5LowLevelMaskedWordPieceDataset,
+        dataset_path: str,
+        indexed_indices: numpy.ndarray,
+        num_samples: Optional[int],
+        index_split: Split,
+        config: T5MaskedWordPieceDatasetConfig,
+    ) -> None:
+        assert config.mock
+
+        super().__init__(
+            dataset,  # type: ignore[arg-type]
+            dataset_path,
+            indexed_indices,
+            num_samples,
+            index_split,
+            config,
+        )
+
+    @staticmethod
+    def numel_low_level_dataset(low_level_dataset: MockT5LowLevelMaskedWordPieceDataset) -> int:
+        """Abstract method implementation
+
+        Args:
+            low_level_dataset (MockT5LowLevelMaskedWordPieceDataset): The underlying MockT5LowLevelMaskedWordPieceDataset
+
+        Returns:
+            int: The number of unique elements in the underlying MockT5LowLevelMaskedWordPieceDataset
+        """
+        return len(low_level_dataset)
+
+    @staticmethod
+    def build_low_level_dataset(  # type: ignore[override]
+        dataset_path: Optional[str], config: MaskedWordPieceDatasetConfig
+    ) -> MockT5LowLevelMaskedWordPieceDataset:
+        """Abstract method implementation
+
+        Args:
+            dataset_path (Optional[str]): This argument is of no consequence for the
+                MockT5LowLevelMaskedWordPieceDataset
+
+            config (GPTDatasetConfig): The config
+
+        Returns:
+            MockT5LowLevelMaskedWordPieceDataset: The underlying MockT5LowLevelMaskedWordPieceDataset
+        """
+        assert config.tokenizer is not None, "tokenizer needs to be not `None`"
+        return MockT5LowLevelMaskedWordPieceDataset(config.tokenizer)
+
+    def _build_sample_index(
+        self, sequence_length: int, min_sentences_per_sample: int
+    ) -> numpy.ndarray:
+        num_samples = len(self.datasets.sequence_lengths)
+        sequence_length = self.config.sequence_length_encoder
+
+        sample_sequence_lengths = self.datasets.sequence_lengths
+        # Keep place for BOS and EOS tokens
+        sample_sequence_lengths = sample_sequence_lengths.clip(1, sequence_length - 2)
+        sample_sequence_lengths = sample_sequence_lengths.astype(numpy.int64).expand_dims(-1)
+        return numpy.hstack(
+            [
+                # idx_beg
+                numpy.zeros((num_samples, 1), dtype=numpy.int64),
+                # idx_end
+                sample_sequence_lengths,
+                # target_sequence_length
+                sample_sequence_lengths,
+            ]
+        )

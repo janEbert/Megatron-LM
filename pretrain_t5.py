@@ -13,6 +13,7 @@ from megatron.core import mpu, tensor_parallel
 from megatron.core.tokenizers.utils.build_tokenizer import build_tokenizer
 from megatron.core.datasets.blended_megatron_dataset_builder import BlendedMegatronDatasetBuilder
 from megatron.core.datasets.t5_dataset import (
+    MockT5MaskedWordPieceDataset,
     T5MaskedWordPieceDataset,
     T5MaskedWordPieceDatasetConfig,
 )
@@ -238,10 +239,15 @@ def train_valid_test_datasets_provider(train_val_test_num_samples: int):
         allow_ambiguous_pad_tokens=args.allow_ambiguous_pad_tokens,
     )
 
+    if args.mock_data:
+        dataset_type = MockT5MaskedWordPieceDataset
+    else:
+        dataset_type = T5MaskedWordPieceDataset
+
     print_rank_0('> building train, validation, and test datasets for T5 ...')
 
     train_ds, valid_ds, test_ds = BlendedMegatronDatasetBuilder(
-        T5MaskedWordPieceDataset,
+        dataset_type,
         train_val_test_num_samples,
         lambda: mpu.get_tensor_model_parallel_rank() == 0,
         config,
