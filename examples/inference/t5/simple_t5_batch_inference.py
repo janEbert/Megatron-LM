@@ -7,11 +7,9 @@ from argparse import Namespace
 import torch
 
 import pretrain_t5
+from megatron.core.inference.contexts import StaticInferenceContext
 from megatron.core.inference.engines import AbstractEngine, StaticInferenceEngine
 from megatron.core.inference.inference_request import InferenceRequest
-from megatron.core.inference.model_inference_wrappers.inference_wrapper_config import (
-    InferenceWrapperConfig,
-)
 from megatron.core.inference.model_inference_wrappers.t5.t5_inference_wrapper import (
     T5InferenceWrapper,
 )
@@ -21,6 +19,7 @@ from megatron.core.inference.text_generation_controllers.encoder_decoder_text_ge
 )
 from megatron.core.tokenizers.utils.build_tokenizer import build_tokenizer
 from megatron.core.transformer.module import MegatronModule
+from megatron.inference.utils import add_inference_args
 from pretrain_t5 import model_provider
 
 sys.path.append(
@@ -37,23 +36,11 @@ from megatron.training.initialize import initialize_megatron
 
 def add_text_generate_args(parser):
     """Text generation arguments."""
-    group = parser.add_argument_group(title='text generation')
+    # Add common inference args (temperature, top_k, top_p, num-tokens-to-generate, return-log-probs, etc.)
+    add_inference_args(parser)
 
-    group.add_argument("--temperature", type=float, default=1.0, help='Sampling temperature.')
-    group.add_argument("--top_k", type=int, default=1, help='Top k sampling.')
-    group.add_argument("--top_p", type=float, default=0.0, help='Top p sampling.')
-    group.add_argument(
-        "--return-log-probs",
-        action='store_true',
-        default=False,
-        help='Return the log probabilities of the final output tokens',
-    )
-    group.add_argument(
-        "--num-tokens-to-generate",
-        type=int,
-        default=30,
-        help='Number of tokens to generate for each prompt',
-    )
+    # Add T5-specific args
+    group = parser.add_argument_group(title='T5 inference')
     group.add_argument(
         "--encoder-prompts",
         metavar='N',
@@ -61,42 +48,30 @@ def add_text_generate_args(parser):
         nargs='+',
         help='Encoder input prompts with each prompt within quotes and separated by space',
     )
-    group.add_argument(
-        "--max-batch-size", type=int, default=1, help='Max number of prompts to process at once'
-    )
     return parser
 
 
-def get_inference_engine(args: Namespace, model: MegatronModule) -> AbstractEngine:
+def get_inference_engine(args: Namespace, model: MegatronModule, tokenizer) -> AbstractEngine:
     """Utility to get the relevant backend for running inference
 
     This function will automatically chose the TRTLLMBackend when possible, and if not revert to Mcore backend if the user does not specify any backends. TRT LLM Backend is not implmented yet.
 
     Args:
         args (Namespace): The user arguments parsed from command line
-        model (MegatronModule): The megatron model .
+        model (MegatronModule): The megatron model
+        tokenizer: The tokenizer to use for text generation
 
     Returns:
         AbstractBackend: The chosen backend
     """
-    # Build tokenizer
-    tokenizer = build_tokenizer(args)
-
-    inference_wrapper_config = InferenceWrapperConfig(
-        hidden_size=args.hidden_size,
-        inference_batch_times_seqlen_threshold=args.inference_batch_times_seqlen_threshold,
-        fp32_residual_connection=args.fp32_residual_connection,
-        params_dtype=args.params_dtype,
-        padded_vocab_size=args.padded_vocab_size,
+    inference_context = StaticInferenceContext(
+        args.inference_max_requests, args.inference_max_seq_length
     )
-
-    inference_wrapped_model = T5InferenceWrapper(model, inference_wrapper_config)
+    inference_wrapped_model = T5InferenceWrapper(model, inference_context)
     text_generation_controller = EncoderDecoderTextGenerationController(
         inference_wrapped_model=inference_wrapped_model, tokenizer=tokenizer
     )
-    return StaticInferenceEngine(
-        text_generation_controller=text_generation_controller, max_batch_size=args.max_batch_size
-    )
+    return StaticInferenceEngine(text_generation_controller=text_generation_controller)
 
 
 def main():
@@ -121,7 +96,13 @@ def main():
 
     args = get_args()
 
-    inference_engine = get_inference_engine(args, model)
+    # Create tokenizer once
+    if args.legacy_tokenizer:
+        tokenizer = get_tokenizer()
+    else:
+        tokenizer = build_tokenizer(args)
+
+    inference_engine = get_inference_engine(args, model, tokenizer)
 
     sampling_params = SamplingParams(
         temperature=args.temperature,
@@ -130,10 +111,6 @@ def main():
         return_log_probs=args.return_log_probs,
         num_tokens_to_generate=args.num_tokens_to_generate,
     )
-
-    # Build tokenizer
-    tokenizer = build_tokenizer(args)
-
     decoder_prompts = [""] * len(
         args.encoder_prompts
     )  # for T5, the prompt is provided as encoder input, hence decoder_prompts is empty
