@@ -13,6 +13,9 @@ from megatron.core.inference.contexts import DynamicInferenceContext, StaticInfe
 from megatron.core.inference.engines.abstract_engine import AbstractEngine
 from megatron.core.inference.engines.dynamic_engine import DynamicInferenceEngine
 from megatron.core.inference.inference_request import InferenceRequest
+from megatron.core.inference.model_inference_wrappers.t5.t5_inference_wrapper import (
+    T5InferenceWrapper,
+)
 from megatron.core.inference.sampling_params import SamplingParams
 from megatron.core.inference.scheduler import Scheduler
 from megatron.core.inference.text_generation_controllers.text_generation_controller import (
@@ -98,6 +101,11 @@ class StaticInferenceEngine(AbstractEngine):
 
         try:
             if not legacy:
+                # Detect if this is an encoder-decoder model by checking wrapper type
+                is_encoder_decoder = isinstance(
+                    self.inference_wrapped_model, T5InferenceWrapper
+                )
+
                 dynamic_context = DynamicInferenceContext(
                     model_config=self.config,
                     inference_config=InferenceConfig(
@@ -108,6 +116,8 @@ class StaticInferenceEngine(AbstractEngine):
                         num_cuda_graphs=1,
                         block_size_tokens=256,
                         unified_memory_level=0,
+                        is_encoder_decoder=is_encoder_decoder,
+                        max_encoder_sequence_length=original_context.max_sequence_length if is_encoder_decoder else None,
                     ),
                 )
 

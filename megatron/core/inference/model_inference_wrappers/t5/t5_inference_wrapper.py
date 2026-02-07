@@ -283,16 +283,17 @@ class T5InferenceWrapper(AbstractModelInferenceWrapper):
         Returns:
             torch.Tensor: The output logits of shape [batch_size, seq_len, padded_vocab_size]
         """
+        # Check if this is a two-phase inference call
+        if "phase" in inference_input:
+            return self._forward(inference_input)
+
+        # Legacy path: extract static inference inputs
         encoder_tokens = inference_input["encoder_tokens"]
         decoder_tokens = inference_input["decoder_tokens"]
         encoder_mask = inference_input["encoder_mask"]
         decoder_mask = inference_input["decoder_mask"]
         encoder_decoder_mask = inference_input["encoder_decoder_mask"]
         tokens = decoder_tokens
-
-        # Check if this is a two-phase inference call
-        if "phase" in inference_input:
-            return self._forward(inference_input)
 
         # Legacy path: single-phase inference without KV caching
         logits = self.model(

@@ -250,6 +250,7 @@ class DynamicInferenceContext(BaseInferenceContext):
                 inference_config.block_size_tokens == 64
             ), "Flash MLA requires a block size of 64. Set --inference-dynamic-batching-block-size 64 to fix this assert"
 
+        self.hidden_size = model_config.hidden_size
         # Per partition num heads and hidden size.
         num_attention_heads = model_config.num_query_groups or model_config.num_attention_heads
         projection_size = model_config.kv_channels * num_attention_heads
@@ -690,10 +691,8 @@ class DynamicInferenceContext(BaseInferenceContext):
         # Encoder-decoder model state (for T5 and similar models).
         if self.is_encoder_decoder:
             # Store encoder hidden states: [max_requests, max_encoder_sequence_length, hidden_size]
-            # Hidden size needs to be determined from model_config
-            hidden_size = model_config.hidden_size
             self.encoder_hidden_states = torch.empty(
-                (self.max_requests, self.max_encoder_sequence_length, hidden_size),
+                (self.max_requests, self.max_encoder_sequence_length, self.hidden_size),
                 dtype=self.params_dtype,
                 device=torch.cuda.current_device(),
             )
