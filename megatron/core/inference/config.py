@@ -161,6 +161,12 @@ class InferenceConfig:
     max_sequence_length: int = 2560
     """Max possible sequence length (prompt + output) that will occur."""
 
+    is_encoder_decoder: bool = False
+    """Whether the model is an encoder-decoder model (e.g., T5)."""
+
+    max_encoder_sequence_length: Optional[int] = None
+    """Max possible encoder sequence length for encoder-decoder models. Defaults to max_sequence_length if not specified."""
+
     mamba_inference_state_config: Optional[MambaInferenceStateConfig] = None
     """The Mamba inference state config if the model is a hybrid model."""
 

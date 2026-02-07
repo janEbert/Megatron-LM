@@ -8,7 +8,8 @@ import torch
 
 import pretrain_t5
 from megatron.core.inference.contexts import StaticInferenceContext
-from megatron.core.inference.engines import AbstractEngine, StaticInferenceEngine
+from megatron.core.inference.contexts.dynamic_context import DynamicInferenceContext
+from megatron.core.inference.engines import AbstractEngine, StaticInferenceEngine, DynamicInferenceEngine
 from megatron.core.inference.inference_request import InferenceRequest
 from megatron.core.inference.model_inference_wrappers.t5.t5_inference_wrapper import (
     T5InferenceWrapper,
@@ -19,7 +20,7 @@ from megatron.core.inference.text_generation_controllers.encoder_decoder_text_ge
 )
 from megatron.core.tokenizers.utils.build_tokenizer import build_tokenizer
 from megatron.core.transformer.module import MegatronModule
-from megatron.inference.utils import add_inference_args
+from megatron.inference.utils import add_inference_args, get_inference_config_from_model_and_args
 from pretrain_t5 import model_provider
 
 sys.path.append(
@@ -48,6 +49,13 @@ def add_text_generate_args(parser):
         nargs='+',
         help='Encoder input prompts with each prompt within quotes and separated by space',
     )
+    group.add_argument(
+        "--engine-type",
+        type=str,
+        choices=["static", "dynamic"],
+        default="static",
+        help="Type of inference engine to use (static or dynamic)",
+    )
     return parser
 
 
@@ -64,14 +72,25 @@ def get_inference_engine(args: Namespace, model: MegatronModule, tokenizer) -> A
     Returns:
         AbstractBackend: The chosen backend
     """
-    inference_context = StaticInferenceContext(
-        args.inference_max_requests, args.inference_max_seq_length
-    )
-    inference_wrapped_model = T5InferenceWrapper(model, inference_context)
-    text_generation_controller = EncoderDecoderTextGenerationController(
-        inference_wrapped_model=inference_wrapped_model, tokenizer=tokenizer
-    )
-    return StaticInferenceEngine(text_generation_controller=text_generation_controller)
+    use_local = getattr(args, 'transformer_impl', 'transformer_engine') == 'local'
+
+    if args.engine_type == "static":
+        inference_context = StaticInferenceContext(
+            args.inference_max_requests, args.inference_max_seq_length
+        )
+        inference_wrapped_model = T5InferenceWrapper(model, inference_context, use_local=use_local)
+        text_generation_controller = EncoderDecoderTextGenerationController(
+            inference_wrapped_model=inference_wrapped_model, tokenizer=tokenizer
+        )
+        return StaticInferenceEngine(text_generation_controller=text_generation_controller)
+    else:  # dynamic
+        inference_config = get_inference_config_from_model_and_args(model, args)
+        inference_context = DynamicInferenceContext(model.config, inference_config)
+        inference_wrapped_model = T5InferenceWrapper(model, inference_context, use_local=use_local)
+        text_generation_controller = EncoderDecoderTextGenerationController(
+            inference_wrapped_model=inference_wrapped_model, tokenizer=tokenizer
+        )
+        return DynamicInferenceEngine(text_generation_controller=text_generation_controller, context=inference_context)
 
 
 def main():

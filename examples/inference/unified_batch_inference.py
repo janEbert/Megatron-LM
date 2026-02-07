@@ -7,9 +7,6 @@ Unified batch inference script supporting:
 - Engine types: Static and Dynamic inference engines
 - Hardware: Multi-GPU with tensor parallelism
 - Usage: Simple command-line batch testing (no Slurm required)
-
-IMPORTANT: T5 + Dynamic engine is NOT currently supported because T5 lacks KV cache
-support (see t5_inference_wrapper.py:166,214).
 """
 
 import json
@@ -228,6 +225,16 @@ def build_dynamic_gpt_engine(args, model, tokenizer):
     return DynamicInferenceEngine(controller, context)
 
 
+def build_dynamic_t5_engine(args, model, tokenizer):
+    """Build DynamicInferenceEngine for T5."""
+    use_local = getattr(args, 'transformer_impl', 'transformer_engine') == 'local'
+    inference_config = get_inference_config_from_model_and_args(model, args)
+    context = DynamicInferenceContext(model.config, inference_config)
+    wrapped_model = T5InferenceWrapper(model, context, use_local=use_local)
+    controller = EncoderDecoderTextGenerationController(wrapped_model, tokenizer)
+    return DynamicInferenceEngine(controller, context)
+
+
 def get_inference_engine(args, model, tokenizer):
     """Factory function to create appropriate inference engine."""
     model_type = args.inf_model_type
@@ -243,12 +250,7 @@ def get_inference_engine(args, model, tokenizer):
         if engine_type == "static":
             return build_static_t5_engine(args, model, tokenizer)
         else:
-            raise NotImplementedError(
-                "T5 + Dynamic inference is NOT supported.\n"
-                "T5 lacks KV cache support required for dynamic batching.\n"
-                "See t5_inference_wrapper.py lines 166 and 214.\n"
-                "Use --engine-type static for T5 models."
-            )
+            return build_dynamic_t5_engine(args, model, tokenizer)
 
 
 # ============================================================================

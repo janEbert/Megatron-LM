@@ -285,6 +285,7 @@ class DynamicInferenceRequest(InferenceRequest):
     request_id: int
     prompt: Optional[str] = None
     prompt_tokens: Optional[torch.Tensor] = None
+    encoder_prompt_tokens: Optional[torch.Tensor] = None
     # remaining prompt tokens are used for chunked prefill
     remaining_prompt_tokens: Optional[torch.Tensor] = None
     policy_staleness: Optional[torch.Tensor] = None
@@ -596,6 +597,8 @@ class DynamicInferenceRequestRecord:
         new_request = DynamicInferenceRequest(
             request_id=old_request.request_id,
             prompt_tokens=new_prompt_tokens,
+            encoder_prompt=old_request.encoder_prompt,
+            encoder_prompt_tokens=old_request.encoder_prompt_tokens,
             sampling_params=new_sampling_params,
             policy_staleness=policy_staleness,
             kv_cache_staleness=kv_cache_staleness,
@@ -649,6 +652,8 @@ class DynamicInferenceRequestRecord:
             request_id=self.requests[0].request_id,
             prompt=prompt_text,
             prompt_tokens=prompt_tokens,
+            encoder_prompt=self.requests[0].encoder_prompt,
+            encoder_prompt_tokens=self.requests[0].encoder_prompt_tokens,
             prompt_log_probs=self.requests[0].prompt_log_probs,
             prompt_top_n_logprobs=self.requests[0].prompt_top_n_logprobs,
             generated_text=generated_text,

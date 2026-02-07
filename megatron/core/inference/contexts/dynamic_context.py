@@ -451,6 +451,12 @@ class DynamicInferenceContext(BaseInferenceContext):
         self.params_dtype = model_config.params_dtype
         self.max_sequence_length = inference_config.max_sequence_length
 
+        # Encoder-decoder model config.
+        self.is_encoder_decoder = inference_config.is_encoder_decoder
+        self.max_encoder_sequence_length = (
+            inference_config.max_encoder_sequence_length or inference_config.max_sequence_length
+        )
+
         # Request and token counts.
         self.total_request_count = 0
         self.active_token_count = 0
@@ -681,6 +687,29 @@ class DynamicInferenceContext(BaseInferenceContext):
             for label, dtype, _ in self.request_metadata_types
         }
 
+        # Encoder-decoder model state (for T5 and similar models).
+        if self.is_encoder_decoder:
+            # Store encoder hidden states: [max_requests, max_encoder_sequence_length, hidden_size]
+            # Hidden size needs to be determined from model_config
+            hidden_size = model_config.hidden_size
+            self.encoder_hidden_states = torch.empty(
+                (self.max_requests, self.max_encoder_sequence_length, hidden_size),
+                dtype=self.params_dtype,
+                device=torch.cuda.current_device(),
+            )
+            # Track the actual sequence length for each request's encoder output
+            self.encoder_seq_lengths = torch.full(
+                (self.max_requests,), -1, dtype=torch.int32, device=torch.cuda.current_device()
+            )
+            # Track whether encoder prefill has been done for each request
+            self.encoder_prefill_done = torch.full(
+                (self.max_requests,), False, dtype=torch.bool, device=torch.cuda.current_device()
+            )
+        else:
+            self.encoder_hidden_states = None
+            self.encoder_seq_lengths = None
+            self.encoder_prefill_done = None
+
         # Per-token state.
         self.token_to_input_ids = torch.full(
             (self.max_tokens,), 0, dtype=torch.long, device=torch.cuda.current_device()
@@ -851,6 +880,85 @@ class DynamicInferenceContext(BaseInferenceContext):
     def get_active_request_count(self):
         """Returns the current number of active requests."""
         return self.total_request_count - self.paused_request_count
+
+    def set_encoder_hidden_states(
+        self, request_idx: int, hidden_states: Tensor, seq_length: int
+    ) -> None:
+        """Store encoder hidden states for a specific request.
+
+        Args:
+            request_idx (int): Request index in the context.
+            hidden_states (Tensor): Encoder hidden states [seq_length, hidden_size].
+            seq_length (int): Actual sequence length of the encoder output.
+        """
+        if not self.is_encoder_decoder:
+            raise RuntimeError("set_encoder_hidden_states called on non-encoder-decoder model")
+
+        if seq_length > self.max_encoder_sequence_length:
+            raise ValueError(
+                f"Encoder sequence length {seq_length} exceeds max {self.max_encoder_sequence_length}"
+            )
+
+        # Store the hidden states and metadata
+        self.encoder_hidden_states[request_idx, :seq_length] = hidden_states
+        self.encoder_seq_lengths[request_idx] = seq_length
+        self.encoder_prefill_done[request_idx] = True
+
+    def get_encoder_hidden_states_for_batch(
+        self, request_indexes: Optional[Tensor] = None
+    ) -> Tuple[Tensor, Tensor]:
+        """Get encoder hidden states for a batch of requests.
+
+        Args:
+            request_indexes (Optional[Tensor]): Request indexes to retrieve. If None, returns all active requests.
+
+        Returns:
+            Tuple[Tensor, Tensor]: (hidden_states, seq_lengths) where:
+                - hidden_states: [batch_size, max_seq_len, hidden_size]
+                - seq_lengths: [batch_size] actual sequence lengths
+        """
+        if not self.is_encoder_decoder:
+            raise RuntimeError(
+                "get_encoder_hidden_states_for_batch called on non-encoder-decoder model"
+            )
+
+        if request_indexes is None:
+            # Return all active requests (paused_request_count to total_request_count)
+            request_indexes = torch.arange(
+                self.paused_request_count,
+                self.total_request_count,
+                device=self.encoder_hidden_states.device,
+            )
+
+        hidden_states = self.encoder_hidden_states[request_indexes]
+        seq_lengths = self.encoder_seq_lengths[request_indexes]
+
+        return hidden_states, seq_lengths
+
+    def get_encoder_prefill_pending_mask(self, request_indexes: Optional[Tensor] = None) -> Tensor:
+        """Get a mask indicating which requests still need encoder prefill.
+
+        Args:
+            request_indexes (Optional[Tensor]): Request indexes to check. If None, checks all active requests.
+
+        Returns:
+            Tensor: Boolean mask [batch_size] where True indicates encoder prefill is pending.
+        """
+        if not self.is_encoder_decoder:
+            raise RuntimeError(
+                "get_encoder_prefill_pending_mask called on non-encoder-decoder model"
+            )
+
+        if request_indexes is None:
+            # Check all active requests
+            request_indexes = torch.arange(
+                self.paused_request_count,
+                self.total_request_count,
+                device=self.encoder_prefill_done.device,
+            )
+
+        # Return mask where True = encoder prefill NOT done (i.e., pending)
+        return ~self.encoder_prefill_done[request_indexes]
 
     def append_key_value_cache(self, layer_number: int, key: Tensor, value: Tensor) -> None:
         """Append to KV cache.
@@ -1656,6 +1764,13 @@ class DynamicInferenceContext(BaseInferenceContext):
             self.mamba_ssm_states[:, mamba_idx] = 0.0
             self.mamba_metadata.request_to_mamba_state_idx[self.total_request_count] = mamba_idx
 
+        # Initialize encoder-decoder state for new requests
+        if self.is_encoder_decoder and not is_chunked_prefill:
+            # Mark that encoder prefill is not yet done for this request
+            self.encoder_prefill_done[current_id] = False
+            # Initialize encoder sequence length to -1 (not set)
+            self.encoder_seq_lengths[current_id] = -1
+
         self.active_token_count += chunk_length
         self.total_request_count += 0 if req.finished_chunk_token_count > 0 else 1
         self.num_prefill_requests += 1
@@ -1683,6 +1798,11 @@ class DynamicInferenceContext(BaseInferenceContext):
                 self.mamba_metadata.request_to_mamba_state_idx[src_idxs]
             )
 
+        if self.is_encoder_decoder:
+            self.encoder_hidden_states[dst_idxs] = self.encoder_hidden_states[src_idxs]
+            self.encoder_seq_lengths[dst_idxs] = self.encoder_seq_lengths[src_idxs]
+            self.encoder_prefill_done[dst_idxs] = self.encoder_prefill_done[src_idxs]
+
     def _swap_book_keeping_tensors(self, src_idxs, dst_idxs, next_tokens):
         """
         Swaps all the relevent booking tensors with src idxs to dst idxs
@@ -1702,6 +1822,11 @@ class DynamicInferenceContext(BaseInferenceContext):
 
         if self.is_hybrid_model:
             tensor_swap(self.mamba_metadata.request_to_mamba_state_idx, src_idxs, dst_idxs)
+
+        if self.is_encoder_decoder:
+            tensor_swap(self.encoder_hidden_states, src_idxs, dst_idxs)
+            tensor_swap(self.encoder_seq_lengths, src_idxs, dst_idxs)
+            tensor_swap(self.encoder_prefill_done, src_idxs, dst_idxs)
 
     def get_index_of_chunked_prefill_request(self) -> int:
         """Get the index of the chunked prefill request in the context.
@@ -1738,6 +1863,11 @@ class DynamicInferenceContext(BaseInferenceContext):
         # Free Mamba slots.
         if self.is_hybrid_model:
             self.mamba_metadata.free_slots(request_indexes)
+
+        # Reset encoder-decoder state.
+        if self.is_encoder_decoder:
+            self.encoder_seq_lengths[request_indexes] = -1
+            self.encoder_prefill_done[request_indexes] = False
 
     def resume_paused_requests(
         self,

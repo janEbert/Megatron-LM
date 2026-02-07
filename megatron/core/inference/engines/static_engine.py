@@ -231,15 +231,20 @@ class StaticInferenceEngine(AbstractEngine):
             if add_BOS:
                 sampling_params.add_BOS = True
             request_records = self.dynamic_engine.generate(
-                prompts=prompts, sampling_params=sampling_params
+                prompts=prompts, sampling_params=sampling_params, encoder_prompts=encoder_prompts
             )
         elif inference_requests:
             prompts = [request.prompt for request in inference_requests]
+            encoder_prompts_from_requests = [
+                request.encoder_prompt for request in inference_requests
+            ]
             sampling_params = inference_requests[0].sampling_params
             if add_BOS:
                 sampling_params.add_BOS = True
             request_records = self.dynamic_engine.generate(
-                prompts=prompts, sampling_params=sampling_params
+                prompts=prompts,
+                sampling_params=sampling_params,
+                encoder_prompts=encoder_prompts_from_requests,
             )
 
         # Return the underlying `InferenceRequest` objects from the `DynamicInferenceRequestRecord`s.

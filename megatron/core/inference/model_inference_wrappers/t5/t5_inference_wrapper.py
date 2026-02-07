@@ -189,6 +189,85 @@ class T5InferenceWrapper(AbstractModelInferenceWrapper):
             "encoder_decoder_mask": encoder_decoder_mask2use,
         }
 
+    def run_encoder_forward(self, inference_input: Dict[str, Any]) -> torch.Tensor:
+        """Run encoder-only forward pass.
+
+        Args:
+            inference_input (Dict[str, Any]): A dict containing encoder inputs
+
+        Returns:
+            torch.Tensor: The encoder hidden states
+        """
+        encoder_tokens = inference_input["encoder_tokens"]
+        decoder_tokens = inference_input["decoder_tokens"]
+        encoder_mask = inference_input["encoder_mask"]
+        decoder_mask = inference_input["decoder_mask"]
+        encoder_decoder_mask = inference_input["encoder_decoder_mask"]
+
+        encoder_hidden_states = self.model(
+            encoder_tokens,
+            decoder_tokens,
+            encoder_mask,
+            decoder_mask,
+            encoder_decoder_mask,
+            output_encoder_hidden_only=True,
+            inference_context=self.inference_context,
+        )
+
+        return encoder_hidden_states
+
+    def run_decoder_forward(self, inference_input: Dict[str, Any]) -> torch.Tensor:
+        """Run decoder forward pass with pre-computed encoder hidden states.
+
+        Args:
+            inference_input (Dict[str, Any]): A dict containing decoder inputs and
+                cached encoder_hidden_states
+
+        Returns:
+            torch.Tensor: The output logits of shape [batch_size, seq_len, padded_vocab_size]
+        """
+        encoder_tokens = inference_input["encoder_tokens"]
+        decoder_tokens = inference_input["decoder_tokens"]
+        encoder_mask = inference_input["encoder_mask"]
+        decoder_mask = inference_input["decoder_mask"]
+        encoder_decoder_mask = inference_input["encoder_decoder_mask"]
+        encoder_hidden_states = inference_input["encoder_hidden_states"]
+
+        logits = self.model(
+            encoder_tokens,
+            decoder_tokens,
+            encoder_mask,
+            decoder_mask,
+            encoder_decoder_mask,
+            encoder_hidden_states=encoder_hidden_states,
+            inference_context=self.inference_context,
+        )
+        logits = tensor_parallel.gather_from_tensor_model_parallel_region(logits, self.tp_group)
+
+        return logits
+
+    def _forward(self, inference_input: Dict[str, Any]) -> torch.Tensor:
+        """Dispatcher for two-phase forward pass.
+
+        Args:
+            inference_input (Dict[str, Any]): Must include "phase" key with value
+                "encoder_only" or "decoder_with_cached_encoder"
+
+        Returns:
+            torch.Tensor: encoder_hidden_states for encoder_only phase,
+                or logits for decoder_with_cached_encoder phase
+        """
+        phase = inference_input.get("phase")
+
+        if phase == "encoder_only":
+            return self.run_encoder_forward(inference_input)
+        elif phase == "decoder_with_cached_encoder":
+            return self.run_decoder_forward(inference_input)
+        else:
+            raise ValueError(
+                f"Invalid phase '{phase}'. Must be 'encoder_only' or 'decoder_with_cached_encoder'"
+            )
+
     def forward_pass_without_pipeline_parallel(
         self, inference_input: Dict[str, Any]
     ) -> torch.Tensor:
@@ -211,7 +290,11 @@ class T5InferenceWrapper(AbstractModelInferenceWrapper):
         encoder_decoder_mask = inference_input["encoder_decoder_mask"]
         tokens = decoder_tokens
 
-        # T5 inference not yet support kv_cache
+        # Check if this is a two-phase inference call
+        if "phase" in inference_input:
+            return self._forward(inference_input)
+
+        # Legacy path: single-phase inference without KV caching
         logits = self.model(
             encoder_tokens,
             decoder_tokens,

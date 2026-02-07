@@ -799,6 +799,7 @@ class DynamicInferenceEngine(AbstractEngine):
         request_id: int,
         prompt: Union[str, List[int], Tensor],
         sampling_params: Optional[SamplingParams] = None,
+        encoder_prompt: Optional[Union[str, List[int], Tensor]] = None,
     ) -> asyncio.Future[DynamicInferenceRequest]:
         """Add request to inference context.
 
@@ -806,6 +807,8 @@ class DynamicInferenceEngine(AbstractEngine):
             request_id (int): Unique ID of request.
             prompt (Union[str, Tensor]): Prompt as either a text string or token IDs.
             sampling_params (Optional[SamplingParams]): Sampling parameters for the request.
+            encoder_prompt (Optional[Union[str, List[int], Tensor]]): Encoder prompt as either
+                a text string or token IDs. Used for encoder-decoder models like T5.
 
         Return:
             Returns an asyncio `Future[DynamicInferenceRequest]` for the user to wait on.
@@ -836,11 +839,41 @@ class DynamicInferenceEngine(AbstractEngine):
         else:
             raise Exception("specialize for <%s>." % type(prompt).__name__)
 
+        # Tokenize encoder_prompt if provided and is text.
+        encoder_prompt_tokens = None
+        if encoder_prompt is not None:
+            if isinstance(encoder_prompt, str):
+                # Tokenize encoder prompt. Support legacy single-arg mocks.
+                try:
+                    encoder_prompt_token_ids = self.controller.tokenize_prompt(
+                        encoder_prompt, sampling_params.add_BOS if sampling_params else False
+                    )
+                except TypeError:
+                    encoder_prompt_token_ids = self.controller.tokenize_prompt(encoder_prompt)
+                encoder_prompt_tokens = torch.tensor(
+                    encoder_prompt_token_ids, dtype=torch.int64, device=torch.cuda.current_device()
+                )
+            elif isinstance(encoder_prompt, list):
+                # Convert List[int] -> Tensor.
+                encoder_prompt_tokens = torch.tensor(
+                    encoder_prompt, dtype=torch.int64, device=torch.cuda.current_device()
+                )
+            elif isinstance(encoder_prompt, torch.Tensor):
+                # Encoder prompt already tokenized.
+                assert encoder_prompt.dtype == torch.int64, encoder_prompt.dtype
+                assert encoder_prompt.device == torch.device(
+                    f"cuda:{torch.cuda.current_device()}"
+                ), encoder_prompt.device
+                encoder_prompt_tokens = encoder_prompt
+            else:
+                raise Exception("specialize for <%s>." % type(encoder_prompt).__name__)
+
         # Initialize request.
         request = DynamicInferenceRequest(
             request_id=request_id,
             prompt=prompt_str,
             prompt_tokens=tokens,
+            encoder_prompt_tokens=encoder_prompt_tokens,
             sampling_params=sampling_params,
         )
 
@@ -1500,13 +1533,31 @@ class DynamicInferenceEngine(AbstractEngine):
     step = step_legacy
 
     def generate(
-        self, prompts: List[str], sampling_params: Optional[SamplingParams] = SamplingParams()
+        self,
+        prompts: List[str],
+        sampling_params: Optional[SamplingParams] = SamplingParams(),
+        encoder_prompts: Optional[List[str]] = None,
     ) -> List[DynamicInferenceRequest]:
-        """Generates completions for a static list of prompts."""
+        """Generates completions for a static list of prompts.
 
-        for prompt in prompts:
+        Args:
+            prompts (List[str]): List of decoder prompts.
+            sampling_params (Optional[SamplingParams]): Sampling parameters for generation.
+            encoder_prompts (Optional[List[str]]): List of encoder prompts for encoder-decoder
+                models like T5. If provided, must be the same length as prompts.
+
+        Returns:
+            List[DynamicInferenceRequest]: List of completed requests with generated tokens.
+        """
+        if encoder_prompts is not None:
+            assert len(encoder_prompts) == len(
+                prompts
+            ), f"encoder_prompts length ({len(encoder_prompts)}) must match prompts length ({len(prompts)})"
+
+        for idx, prompt in enumerate(prompts):
             request_id = int(next(self.request_counter))
-            _ = self.add_request(request_id, prompt, sampling_params)
+            encoder_prompt = encoder_prompts[idx] if encoder_prompts is not None else None
+            _ = self.add_request(request_id, prompt, sampling_params, encoder_prompt)
 
         finished_request_records_list = []
         while self.has_unfinished_requests():
