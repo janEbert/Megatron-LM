@@ -63,7 +63,7 @@ def add_unified_inference_args(parser):
 
     # Model and engine selection
     group.add_argument(
-        "--model-type",
+        "--inf-model-type",
         type=str,
         choices=["gpt", "t5"],
         default="gpt",
@@ -87,18 +87,18 @@ def add_unified_inference_args(parser):
     )
 
     # Static engine specific args
-    group.add_argument(
-        "--inference-max-requests",
-        type=int,
-        default=8,
-        help='Maximum batch size for static inference engine',
-    )
-    group.add_argument(
-        "--inference-max-seq-length",
-        type=int,
-        default=2048,
-        help='Maximum sequence length for static inference engine',
-    )
+    # group.add_argument(
+    #     "--inference-max-requests",
+    #     type=int,
+    #     default=8,
+    #     help='Maximum batch size for static inference engine',
+    # )
+    # group.add_argument(
+    #     "--inference-max-seq-length",
+    #     type=int,
+    #     default=2048,
+    #     help='Maximum sequence length for static inference engine',
+    # )
 
     return parser
 
@@ -108,7 +108,7 @@ def add_unified_inference_args(parser):
 # ============================================================================
 
 
-def gpt_model_provider(pre_process=True, post_process=True):
+def gpt_model_provider(pre_process=True, post_process=True, vp_stage: int | None = None, config=None, pg_collection=None):
     """Build GPT model."""
     from megatron.core.models.gpt import GPTModel
     from megatron.core.models.gpt.gpt_layer_specs import (
@@ -139,7 +139,7 @@ def gpt_model_provider(pre_process=True, post_process=True):
     return model
 
 
-def t5_model_provider(pre_process=True, post_process=True, add_encoder=True, add_decoder=True):
+def t5_model_provider(pre_process=True, post_process=True, vp_stage: int | None = None, config=None, pg_collection=None):
     """Build T5 model."""
     from copy import deepcopy
     from megatron.core.models.T5 import T5Model
@@ -153,19 +153,20 @@ def t5_model_provider(pre_process=True, post_process=True, add_encoder=True, add
 
     args = get_args()
     config = core_transformer_config_from_args(args)
+    # config.num_layers = args.decoder_num_layers
 
     # Encoder config (may have different num_layers)
     encoder_config = deepcopy(config)
-    encoder_config.num_layers = args.encoder_num_layers
+    # encoder_config.num_layers = args.encoder_num_layers
 
     # Get layer specs
     use_te = args.transformer_impl != "local"
     if use_te:
         en_block_spec = get_t5_encoder_with_transformer_engine_block_spec(args.encoder_num_layers)
-        de_block_spec = get_t5_decoder_with_transformer_engine_block_spec(args.num_layers)
+        de_block_spec = get_t5_decoder_with_transformer_engine_block_spec(args.decoder_num_layers)
     else:
         en_block_spec = get_t5_encoder_with_local_block_spec(args.encoder_num_layers)
-        de_block_spec = get_t5_decoder_with_local_block_spec(args.num_layers)
+        de_block_spec = get_t5_decoder_with_local_block_spec(args.decoder_num_layers)
 
     model = T5Model(
         config=config,
@@ -180,8 +181,7 @@ def t5_model_provider(pre_process=True, post_process=True, add_encoder=True, add
         parallel_output=True,
         share_embeddings_and_output_weights=not args.untie_embeddings_and_output_weights,
         position_embedding_type=args.position_embedding_type,
-        add_encoder=add_encoder,
-        add_decoder=add_decoder,
+        rotary_percent=1.0,
     )
     return model
 
@@ -198,6 +198,7 @@ def build_static_gpt_engine(args, model, tokenizer):
     )
     wrapped_model = GPTInferenceWrapper(model, inference_context)
     controller = TextGenerationController(inference_wrapped_model=wrapped_model, tokenizer=tokenizer)
+    # buffer_size_gb=40 by default
     return StaticInferenceEngine(text_generation_controller=controller)
 
 
@@ -205,9 +206,13 @@ def build_static_t5_engine(args, model, tokenizer):
     """Build StaticInferenceEngine for T5."""
     use_local = getattr(args, 'transformer_impl', 'transformer_engine') == 'local'
 
+    # TODO some inference context needs to be passed
+    inference_context = StaticInferenceContext(
+        args.inference_max_requests, args.inference_max_seq_length
+    )
     # T5 static inference doesn't use KV cache, so we pass None for context
     # The use_local flag indicates whether to use local transformer impl or TE
-    wrapped_model = T5InferenceWrapper(model, inference_context=None, use_local=use_local)
+    wrapped_model = T5InferenceWrapper(model, inference_context=inference_context, use_local=use_local)
     controller = EncoderDecoderTextGenerationController(
         inference_wrapped_model=wrapped_model, tokenizer=tokenizer
     )
@@ -225,17 +230,8 @@ def build_dynamic_gpt_engine(args, model, tokenizer):
 
 def get_inference_engine(args, model, tokenizer):
     """Factory function to create appropriate inference engine."""
-    model_type = args.model_type
+    model_type = args.inf_model_type
     engine_type = args.engine_type
-
-    # Validate combination
-    if model_type == "t5" and engine_type == "dynamic":
-        raise NotImplementedError(
-            "T5 + Dynamic inference is NOT supported.\n"
-            "T5 lacks KV cache support required for dynamic batching.\n"
-            "See t5_inference_wrapper.py lines 166 and 214.\n"
-            "Use --engine-type static for T5 models."
-        )
 
     # Build engine
     if model_type == "gpt":
@@ -244,7 +240,15 @@ def get_inference_engine(args, model, tokenizer):
         else:
             return build_dynamic_gpt_engine(args, model, tokenizer)
     else:  # t5
-        return build_static_t5_engine(args, model, tokenizer)
+        if engine_type == "static":
+            return build_static_t5_engine(args, model, tokenizer)
+        else:
+            raise NotImplementedError(
+                "T5 + Dynamic inference is NOT supported.\n"
+                "T5 lacks KV cache support required for dynamic batching.\n"
+                "See t5_inference_wrapper.py lines 166 and 214.\n"
+                "Use --engine-type static for T5 models."
+            )
 
 
 # ============================================================================
@@ -261,6 +265,7 @@ def main():
         args_defaults={
             'no_load_rng': True,
             'no_load_optim': True,
+            'micro_batch_size': 1,
             'exit_on_missing_checkpoint': True,
         },
     )
@@ -268,12 +273,12 @@ def main():
     args = get_args()
     print_rank_0(f"\n{'='*60}")
     print_rank_0(f"Unified Batch Inference")
-    print_rank_0(f"Model type: {args.model_type}")
+    print_rank_0(f"Model type: {args.inf_model_type}")
     print_rank_0(f"Engine type: {args.engine_type}")
     print_rank_0(f"{'='*60}\n")
 
     # Select model provider
-    if args.model_type == "gpt":
+    if args.inf_model_type == "gpt":
         model_provider_fn = gpt_model_provider
     else:
         model_provider_fn = t5_model_provider
@@ -306,7 +311,7 @@ def main():
     )
 
     # Prepare prompts
-    if args.model_type == "gpt":
+    if args.inf_model_type == "gpt":
         prompts = args.prompts or ["Hello, I am a language model"]
         encoder_prompts = None
         print_rank_0(f"Running inference on {len(prompts)} GPT prompts")
@@ -322,7 +327,7 @@ def main():
 
     start_time = time.time()
 
-    if args.model_type == "t5":
+    if args.inf_model_type == "t5":
         results = engine.generate(
             prompts=prompts, encoder_prompts=encoder_prompts, add_BOS=True, sampling_params=sampling_params
         )
@@ -338,7 +343,7 @@ def main():
         print(f"{'='*60}\n")
         for idx, result in enumerate(results):
             print(f"--- Prompt {idx} ---")
-            if args.model_type == "t5":
+            if args.inf_model_type == "t5":
                 print(f"Encoder: {encoder_prompts[idx]}")
             print(f"Input: {result.prompt}")
             print(f"Output: {result.generated_text}")
@@ -364,7 +369,7 @@ def main():
 
         print(f"{'='*60}")
         print(f"Summary:")
-        print(f"  Model: {args.model_type}")
+        print(f"  Model: {args.inf_model_type}")
         print(f"  Engine: {args.engine_type}")
         print(f"  Prompts: {len(results)}")
         print(f"  Total time: {elapsed:.3f}s")

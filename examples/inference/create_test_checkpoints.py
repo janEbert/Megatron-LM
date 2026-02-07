@@ -5,7 +5,7 @@
 Creates small test checkpoints for unified_batch_inference.py testing.
 
 Usage:
-    python examples/inference/create_test_checkpoints.py --output-dir ./test_checkpoints
+    python examples/inference/create_test_checkpoints.py --output-dir ./test_checkpoints --tp2
 
 Creates:
     ./test_checkpoints/
@@ -35,8 +35,9 @@ def download_bert_vocab(output_dir: Path):
 
     print(f"Downloading BERT vocab to {vocab_path}...")
     import urllib.request
+    from megatron.core.tokenizers.text.libraries.megatron_hf_tokenizer import MEGATRON_CONFIG_MAP
 
-    url = "https://huggingface.co/bert-base-uncased/raw/main/vocab.txt"
+    url = MEGATRON_CONFIG_MAP["BertWordPieceCase"]["vocab"]
     try:
         urllib.request.urlretrieve(url, vocab_path)
         print(f"Successfully downloaded BERT vocab ({vocab_path.stat().st_size} bytes)")
@@ -48,7 +49,50 @@ def download_bert_vocab(output_dir: Path):
     return vocab_path
 
 
-def create_gpt_checkpoint(output_dir: Path, tp_size: int = 1, num_gpus: int = 1):
+def download_gpt_vocab_and_merges(output_dir: Path):
+    """Download GPT2 vocab and merges file for GPT tokenizer."""
+    has_failed = False
+    import urllib.request
+    from megatron.core.tokenizers.text.libraries.megatron_hf_tokenizer import MEGATRON_CONFIG_MAP
+    vocab_path = output_dir / "tokenizers" / "gpt2-vocab.json"
+    vocab_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if vocab_path.exists():
+        print(f"GPT2 vocab already exists at {vocab_path}")
+    else:
+        print(f"Downloading GPT2 vocab to {vocab_path}...")
+
+        url = MEGATRON_CONFIG_MAP["GPT2BPETokenizer"]["vocab"]
+        try:
+            urllib.request.urlretrieve(url, vocab_path)
+            print(f"Successfully downloaded GPT2 vocab ({vocab_path.stat().st_size} bytes)")
+        except Exception as e:
+            print(f"Warning: Failed to download GPT2 vocab: {e}")
+            has_failed = True
+
+    merge_path = output_dir / "tokenizers" / "gpt2-merges.txt"
+    merge_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if merge_path.exists():
+        print(f"GPT2 merges already exist at {merge_path}")
+    else:
+        print(f"Downloading GPT2 merges to {merge_path}...")
+
+        url = MEGATRON_CONFIG_MAP["GPT2BPETokenizer"]["merges_file"]
+        try:
+            urllib.request.urlretrieve(url, merge_path)
+            print(f"Successfully downloaded GPT2 merges ({merge_path.stat().st_size} bytes)")
+        except Exception as e:
+            print(f"Warning: Failed to download GPT2 merges: {e}")
+            has_failed = True
+
+    if has_failed:
+        print("GPT checkpoint creation will be skipped")
+        return None
+    return (vocab_path, merge_path)
+
+
+def create_gpt_checkpoint(output_dir: Path, vocab_path: Path, merge_path: Path, tp_size: int = 1, num_gpus: int = 1):
     """Create minimal GPT checkpoint using pretrain_gpt.py with mock data."""
     ckpt_name = f"gpt-tiny-tp{tp_size}" if tp_size > 1 else "gpt-tiny"
     ckpt_path = output_dir / ckpt_name
@@ -60,7 +104,9 @@ def create_gpt_checkpoint(output_dir: Path, tp_size: int = 1, num_gpus: int = 1)
     print(f"Creating GPT checkpoint (TP={tp_size}) at {ckpt_path}...")
 
     cmd = [
-        "torchrun",
+        "python",
+        "-m",
+        "torch.distributed.run",
         f"--nproc_per_node={num_gpus}",
         "pretrain_gpt.py",
         # Minimal model
@@ -84,15 +130,19 @@ def create_gpt_checkpoint(output_dir: Path, tp_size: int = 1, num_gpus: int = 1)
         str(num_gpus),
         "--train-iters",
         "10",
+        "--eval-interval",
+        "100",
         "--lr",
         "1e-4",
         "--bf16",
         # Mock data
         "--mock-data",
         "--tokenizer-type",
-        "NullTokenizer",
-        "--vocab-size",
-        "1000",
+        "GPT2BPETokenizer",
+        "--vocab-file",
+        vocab_path,
+        "--merge-file",
+        merge_path,
         # Checkpoint
         "--save",
         str(ckpt_path),
@@ -109,6 +159,10 @@ def create_gpt_checkpoint(output_dir: Path, tp_size: int = 1, num_gpus: int = 1)
         "--no-async-tensor-model-parallel-allreduce",
     ]
 
+    if tp_size > 1:
+        prev_max_conn = os.environ.get('CUDA_DEVICE_MAX_CONNECTIONS')
+        os.environ['CUDA_DEVICE_MAX_CONNECTIONS'] = "1"
+
     try:
         result = subprocess.run(cmd, check=True, capture_output=False)
         print(f"Successfully created GPT checkpoint at {ckpt_path}")
@@ -116,10 +170,106 @@ def create_gpt_checkpoint(output_dir: Path, tp_size: int = 1, num_gpus: int = 1)
         print(f"Error creating GPT checkpoint: {e}")
         raise
 
+    if tp_size > 1:
+        if prev_max_conn is None:
+            del os.environ['CUDA_DEVICE_MAX_CONNECTIONS']
+        else:
+            os.environ['CUDA_DEVICE_MAX_CONNECTIONS'] = prev_max_conn
+
     return ckpt_path
 
 
 def create_t5_checkpoint(output_dir: Path, vocab_path: Path, tp_size: int = 1, num_gpus: int = 1):
+    """Create minimal T5 checkpoint using pretrain_t5.py with mock data."""
+    ckpt_name = f"t5-tiny-tp{tp_size}" if tp_size > 1 else "t5-tiny"
+    ckpt_path = output_dir / ckpt_name
+
+    if ckpt_path.exists():
+        print(f"T5 checkpoint already exists at {ckpt_path}, skipping creation")
+        return ckpt_path
+
+    print(f"Creating T5 checkpoint (TP={tp_size}) at {ckpt_path}...")
+
+    cmd = [
+        "python",
+        "-m",
+        "torch.distributed.run",
+        f"--nproc_per_node={num_gpus}",
+        "pretrain_t5.py",
+        # Minimal model
+        "--decoder-num-layers",
+        "2",
+        "--encoder-num-layers",
+        "2",
+        "--hidden-size",
+        "64",
+        "--num-attention-heads",
+        "4",
+        "--decoder-seq-length",
+        "128",
+        "--encoder-seq-length",
+        "128",
+        "--max-position-embeddings",
+        "128",
+        "--untie-embeddings-and-output-weights",
+        # Parallelism
+        "--tensor-model-parallel-size",
+        str(tp_size),
+        # Training
+        "--micro-batch-size",
+        "1",
+        "--global-batch-size",
+        str(num_gpus),
+        "--train-iters",
+        "10",
+        "--eval-interval",
+        "100",
+        "--lr",
+        "1e-4",
+        "--bf16",
+        # Mock data
+        "--mock-data",
+        "--tokenizer-type",
+        "BertWordPieceCase",
+        "--vocab-file",
+        vocab_path,
+        # Checkpoint
+        "--save",
+        str(ckpt_path),
+        "--save-interval",
+        "10",
+        "--no-save-optim",
+        "--no-save-rng",
+        # Disable logging
+        "--log-interval",
+        "10",
+        "--no-masked-softmax-fusion",
+        "--no-bias-gelu-fusion",
+        "--no-bias-dropout-fusion",
+        "--no-async-tensor-model-parallel-allreduce",
+    ]
+
+    if tp_size > 1:
+        prev_max_conn = os.environ.get('CUDA_DEVICE_MAX_CONNECTIONS')
+        os.environ['CUDA_DEVICE_MAX_CONNECTIONS'] = "1"
+
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=False)
+        print(f"Successfully created T5 checkpoint at {ckpt_path}")
+    except subprocess.CalledProcessError as e:
+        print(f"Error creating T5 checkpoint: {e}")
+        raise
+
+    if tp_size > 1:
+        if prev_max_conn is None:
+            del os.environ['CUDA_DEVICE_MAX_CONNECTIONS']
+        else:
+            os.environ['CUDA_DEVICE_MAX_CONNECTIONS'] = prev_max_conn
+
+    return ckpt_path
+
+
+def create_t5_checkpoint_lowlevel(output_dir: Path, vocab_path: Path, tp_size: int = 1, num_gpus: int = 1):
     """Create minimal T5 checkpoint programmatically."""
     ckpt_name = f"t5-tiny-tp{tp_size}" if tp_size > 1 else "t5-tiny"
     ckpt_path = output_dir / ckpt_name
@@ -136,6 +286,7 @@ def create_t5_checkpoint(output_dir: Path, vocab_path: Path, tp_size: int = 1, n
 
     # Create a temporary Python script for T5 checkpoint creation
     script_content = f"""
+from copy import deepcopy
 import os
 import torch
 import torch.distributed as dist
@@ -166,9 +317,10 @@ def main():
     else:
         device = torch.device("cpu")
 
+    num_layers = 2
     # Create config
     config = TransformerConfig(
-        num_layers=2,
+        num_layers=num_layers,
         hidden_size=64,
         num_attention_heads=4,
         kv_channels=16,
@@ -178,13 +330,15 @@ def main():
         params_dtype=torch.bfloat16,
         pipeline_dtype=torch.bfloat16,
     )
+    encoder_config = deepcopy(config)
 
     # Create T5 model
     model = T5Model(
         config=config,
-        transformer_encoder_layer_spec=get_t5_encoder_with_local_block_spec(),
-        transformer_decoder_layer_spec=get_t5_decoder_with_local_block_spec(),
-        vocab_size=30522,  # BERT vocab size
+        encoder_config=encoder_config,
+        transformer_encoder_layer_spec=get_t5_encoder_with_local_block_spec(num_layers=num_layers),
+        transformer_decoder_layer_spec=get_t5_decoder_with_local_block_spec(num_layers=num_layers),
+        vocab_size=30592,  # BERT vocab size, padded; originally 30522
         max_sequence_length=128,
         fp16_lm_cross_entropy=False,
         parallel_output=True,
@@ -206,7 +360,8 @@ def main():
     os.makedirs(iter_dir, exist_ok=True)
 
     # Save using dist_checkpointing
-    sharded_state_dict = model.sharded_state_dict(prefix="model.")
+    # sharded_state_dict = model.sharded_state_dict(prefix="model.")
+    sharded_state_dict = model.sharded_state_dict()
     dist_checkpointing.save(sharded_state_dict, iter_dir)
 
     # Create latest_checkpointed_iteration.txt
@@ -228,9 +383,13 @@ if __name__ == "__main__":
         f.write(script_content)
         temp_script = f.name
 
+    if tp_size > 1:
+        prev_max_conn = os.environ.get('CUDA_DEVICE_MAX_CONNECTIONS')
+        os.environ['CUDA_DEVICE_MAX_CONNECTIONS'] = "1"
+
     try:
         # Run the script with torchrun
-        cmd = ["torchrun", f"--nproc_per_node={num_gpus}", temp_script]
+        cmd = ["python", "-m", "torch.distributed.run", f"--nproc_per_node={num_gpus}", temp_script]
         result = subprocess.run(cmd, check=True, capture_output=False)
         print(f"Successfully created T5 checkpoint at {ckpt_path}")
     except subprocess.CalledProcessError as e:
@@ -240,6 +399,12 @@ if __name__ == "__main__":
         # Clean up temporary script
         if os.path.exists(temp_script):
             os.unlink(temp_script)
+
+    if tp_size > 1:
+        if prev_max_conn is None:
+            del os.environ['CUDA_DEVICE_MAX_CONNECTIONS']
+        else:
+            os.environ['CUDA_DEVICE_MAX_CONNECTIONS'] = prev_max_conn
 
     return ckpt_path
 
@@ -271,15 +436,23 @@ def main():
     print("=" * 80)
 
     # Download tokenizers
-    vocab_path = None
+    bert_vocab_path = None
+    gpt_vocab_path = None
+    gpt_merge_path = None
     if not args.gpt_only and not args.skip_download:
-        vocab_path = download_bert_vocab(output_dir)
+        bert_vocab_path = download_bert_vocab(output_dir)
+        print()
+
+    if not args.t5_only and not args.skip_download:
+        gpt_tok_files = download_gpt_vocab_and_merges(output_dir)
+        if gpt_tok_files is not None:
+            gpt_vocab_path, gpt_merge_path = gpt_tok_files
         print()
 
     # Create GPT checkpoints
     if not args.t5_only:
         try:
-            create_gpt_checkpoint(output_dir, tp_size=1, num_gpus=1)
+            create_gpt_checkpoint(output_dir, gpt_vocab_path, gpt_merge_path, tp_size=1, num_gpus=1)
             print()
         except Exception as e:
             print(f"Failed to create GPT TP=1 checkpoint: {e}")
@@ -287,7 +460,7 @@ def main():
 
         if args.tp2:
             try:
-                create_gpt_checkpoint(output_dir, tp_size=2, num_gpus=2)
+                create_gpt_checkpoint(output_dir, gpt_vocab_path, gpt_merge_path, tp_size=2, num_gpus=2)
                 print()
             except Exception as e:
                 print(f"Failed to create GPT TP=2 checkpoint: {e}")
@@ -296,7 +469,7 @@ def main():
     # Create T5 checkpoints
     if not args.gpt_only:
         try:
-            create_t5_checkpoint(output_dir, vocab_path, tp_size=1, num_gpus=1)
+            create_t5_checkpoint(output_dir, bert_vocab_path, tp_size=1, num_gpus=1)
             print()
         except Exception as e:
             print(f"Failed to create T5 TP=1 checkpoint: {e}")
@@ -304,7 +477,7 @@ def main():
 
         if args.tp2:
             try:
-                create_t5_checkpoint(output_dir, vocab_path, tp_size=2, num_gpus=2)
+                create_t5_checkpoint(output_dir, bert_vocab_path, tp_size=2, num_gpus=2)
                 print()
             except Exception as e:
                 print(f"Failed to create T5 TP=2 checkpoint: {e}")
@@ -316,27 +489,30 @@ def main():
     print("\nTo test with unified_batch_inference.py:")
     print("\n  # GPT:")
     print(
-        f"  torchrun --nproc_per_node=1 examples/inference/unified_batch_inference.py \\"
+        f"  python -m torch.distributed.run --nproc_per_node=1 examples/inference/unified_batch_inference.py \\"
     )
-    print(f"      --model-type gpt --engine-type static \\")
+    print(f"      --inf-model-type gpt --engine-type static \\")
     print(f"      --tensor-model-parallel-size 1 \\")
     print(f"      --num-layers 2 --hidden-size 64 --num-attention-heads 4 \\")
     print(f"      --seq-length 128 --max-position-embeddings 128 \\")
-    print(f"      --load {output_dir}/gpt-tiny \\")
-    print(f"      --tokenizer-type NullTokenizer --vocab-size 1000 \\")
+    print(f"      --load {output_dir}/gpt-tiny --bf16 \\")
+    print(f"      --tokenizer-type GPT2BPETokenizer \\")
+    print(f"      --vocab-file {output_dir}/tokenizers/gpt2-vocab.json \\")
+    print(f"      --merge-file {output_dir}/tokenizers/gpt2-merges.txt \\")
     print(f'      --prompts "test prompt"')
     print("\n  # T5:")
     print(
-        f"  torchrun --nproc_per_node=1 examples/inference/unified_batch_inference.py \\"
+        f"  python -m torch.distributed.run --nproc_per_node=1 examples/inference/unified_batch_inference.py \\"
     )
-    print(f"      --model-type t5 --engine-type static \\")
+    print(f"      --inf-model-type t5 --engine-type static \\")
     print(f"      --tensor-model-parallel-size 1 \\")
-    print(f"      --num-layers 2 --encoder-num-layers 2 \\")
+    print(f"      --decoder-num-layers 2 --encoder-num-layers 2 \\")
     print(f"      --hidden-size 64 --num-attention-heads 4 \\")
     print(f"      --seq-length 128 --max-position-embeddings 128 \\")
-    print(f"      --load {output_dir}/t5-tiny \\")
-    print(f"      --tokenizer-type BertWordPieceLowerCase \\")
+    print(f"      --load {output_dir}/t5-tiny --bf16 \\")
+    print(f"      --tokenizer-type BertWordPieceCase \\")
     print(f"      --vocab-file {output_dir}/tokenizers/bert-vocab.txt \\")
+    print(f"      --untie-embeddings-and-output-weights \\")
     print(f'      --encoder-prompts "translate: hello"')
 
 
