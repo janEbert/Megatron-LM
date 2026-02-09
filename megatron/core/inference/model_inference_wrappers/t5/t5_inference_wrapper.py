@@ -1,8 +1,8 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+import warnings
 from collections import deque
 from typing import Any, Dict, List, Optional
 
-import numpy
 import torch
 
 from megatron.core import tensor_parallel
@@ -55,6 +55,9 @@ class T5InferenceWrapper(AbstractModelInferenceWrapper):
         Returns:
             A dict with all the inference input needed for the batch.
         """
+        if encoder_prompts is None:
+            warnings.warn("No encoder prompts given")
+            encoder_prompts = []
 
         # get max_sequence_length
         max_sequence_length = get_attr_wrapped_model(self.model, "max_sequence_length")
@@ -71,17 +74,15 @@ class T5InferenceWrapper(AbstractModelInferenceWrapper):
         # decoder_input (prompts_tokens), similar to megatron/core/datasets/t5_dataset.py
         decoder_prompts_tokens = prompts_tokens
         encoder_prompts_tokens = batch_encoder_prompts_tokens
-        decoder_prompts_tokens_numpy = decoder_prompts_tokens.cpu().numpy()
-        encoder_prompts_tokens_numpy = encoder_prompts_tokens.cpu().numpy()
         batch_mask_encoder = []
         batch_mask_decoder = []
         for i in range(len(prompts_tokens)):
-            mask_encoder = encoder_prompts_tokens_numpy[i] == tokenizer.pad
-            mask_decoder = decoder_prompts_tokens_numpy[i] == tokenizer.pad
+            mask_encoder = encoder_prompts_tokens[i] == tokenizer.pad
+            mask_decoder = decoder_prompts_tokens[i] == tokenizer.pad
             batch_mask_encoder.append(mask_encoder)
             batch_mask_decoder.append(mask_decoder)
-        batch_mask_encoder = torch.tensor(numpy.array(batch_mask_encoder)).cuda()
-        batch_mask_decoder = torch.tensor(numpy.array(batch_mask_decoder)).cuda()
+        batch_mask_encoder = torch.stack(batch_mask_encoder)
+        batch_mask_decoder = torch.stack(batch_mask_decoder)
 
         return {
             "encoder_tokens": encoder_prompts_tokens,
@@ -139,7 +140,7 @@ class T5InferenceWrapper(AbstractModelInferenceWrapper):
             padding_size = max_sequence_length - len(encoder_prompt_tokens)
             encoder_prompt_tokens.extend([tokenizer.pad] * padding_size)
 
-        return torch.tensor(encoder_prompts_tokens_list).cuda()
+        return torch.tensor(encoder_prompts_tokens_list, device=torch.cuda.current_device())
 
     def get_batch_for_context_window(
         self,

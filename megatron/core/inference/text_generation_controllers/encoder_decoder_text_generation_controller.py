@@ -77,9 +77,7 @@ class EncoderDecoderTextGenerationController(TextGenerationController):
 
         # Check if any requests need encoder prefill
         if context.is_encoder_decoder:
-            active_request_slice = slice(
-                context.paused_request_count, context.total_request_count
-            )
+            active_request_slice = slice(context.paused_request_count, context.total_request_count)
             encoder_prefill_mask = context.get_encoder_prefill_pending_mask()
 
             # Store the mask for use in forward pass
@@ -116,13 +114,11 @@ class EncoderDecoderTextGenerationController(TextGenerationController):
             # Phase 1: Encoder prefill for pending requests
             if self._encoder_prefill_pending is not None and self._encoder_prefill_pending.any():
                 # Get the request indexes that need encoder prefill
-                pending_indexes = (
-                    torch.arange(
-                        context.paused_request_count,
-                        context.total_request_count,
-                        device=input_ids.device,
-                    )[self._encoder_prefill_pending]
-                )
+                pending_indexes = torch.arange(
+                    context.paused_request_count,
+                    context.total_request_count,
+                    device=input_ids.device,
+                )[self._encoder_prefill_pending]
 
                 # Build encoder input for pending requests
                 encoder_tokens_list = []
@@ -137,7 +133,11 @@ class EncoderDecoderTextGenerationController(TextGenerationController):
                         max_encoder_len = max(max_encoder_len, len(encoder_tokens))
                         # Create mask for encoder (False = valid token)
                         encoder_mask_list.append(
-                            torch.zeros(len(encoder_tokens), dtype=torch.bool)
+                            torch.zeros(
+                                len(encoder_tokens),
+                                dtype=torch.bool,
+                                device=torch.cuda.current_device(),
+                            )
                         )
 
                 if encoder_tokens_list:

@@ -102,9 +102,7 @@ class StaticInferenceEngine(AbstractEngine):
         try:
             if not legacy:
                 # Detect if this is an encoder-decoder model by checking wrapper type
-                is_encoder_decoder = isinstance(
-                    self.inference_wrapped_model, T5InferenceWrapper
-                )
+                is_encoder_decoder = isinstance(self.inference_wrapped_model, T5InferenceWrapper)
 
                 dynamic_context = DynamicInferenceContext(
                     model_config=self.config,
@@ -117,7 +115,9 @@ class StaticInferenceEngine(AbstractEngine):
                         block_size_tokens=256,
                         unified_memory_level=0,
                         is_encoder_decoder=is_encoder_decoder,
-                        max_encoder_sequence_length=original_context.max_sequence_length if is_encoder_decoder else None,
+                        max_encoder_sequence_length=(
+                            original_context.max_sequence_length if is_encoder_decoder else None
+                        ),
                     ),
                 )
 

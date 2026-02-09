@@ -860,10 +860,12 @@ class DynamicInferenceEngine(AbstractEngine):
                 )
             elif isinstance(encoder_prompt, torch.Tensor):
                 # Encoder prompt already tokenized.
-                assert encoder_prompt.dtype == torch.int64, encoder_prompt.dtype
-                assert encoder_prompt.device == torch.device(
-                    f"cuda:{torch.cuda.current_device()}"
-                ), encoder_prompt.device
+                assert (
+                    encoder_prompt.dtype == torch.int64
+                ), f"`{encoder_prompt.dtype = }` should be `torch.int64`"
+                assert (
+                    encoder_prompt.device == torch.cuda.current_device()
+                ), f"`{encoder_prompt.device = }` should be `{torch.cuda.current_device()}`"
                 encoder_prompt_tokens = encoder_prompt
             else:
                 raise Exception("specialize for <%s>." % type(encoder_prompt).__name__)
