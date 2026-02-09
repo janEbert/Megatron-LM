@@ -4,7 +4,7 @@ import logging
 import math
 import warnings
 from contextlib import nullcontext
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch  # type: ignore
 import torch.nn.functional as F  # type: ignore
@@ -704,10 +704,14 @@ class DynamicInferenceContext(BaseInferenceContext):
             self.encoder_prefill_done = torch.full(
                 (self.max_requests,), False, dtype=torch.bool, device=torch.cuda.current_device()
             )
+            # Map request_id -> encoder_prompt_tokens (variable-length, keyed by
+            # request_id so no bookkeeping changes needed on slot move/swap).
+            self._encoder_prompt_tokens: Dict[int, Optional[Tensor]] = {}
         else:
             self.encoder_hidden_states = None
             self.encoder_seq_lengths = None
             self.encoder_prefill_done = None
+            self._encoder_prompt_tokens = None
 
         # Per-token state.
         self.token_to_input_ids = torch.full(
@@ -958,6 +962,20 @@ class DynamicInferenceContext(BaseInferenceContext):
 
         # Return mask where True = encoder prefill NOT done (i.e., pending)
         return ~self.encoder_prefill_done[request_indexes]
+
+    def pop_encoder_prompt_tokens(self, request_id: int) -> Optional[Tensor]:
+        """Get and remove stored encoder prompt tokens for a request.
+
+        Called after encoder prefill is done; the raw tokens are no longer
+        needed once encoder hidden states have been cached.
+
+        Args:
+            request_id (int): The request ID to retrieve tokens for.
+
+        Returns:
+            Optional[Tensor]: The encoder prompt tokens, or None if not found.
+        """
+        return self._encoder_prompt_tokens.pop(request_id, None)
 
     def append_key_value_cache(self, layer_number: int, key: Tensor, value: Tensor) -> None:
         """Append to KV cache.
@@ -1769,6 +1787,8 @@ class DynamicInferenceContext(BaseInferenceContext):
             self.encoder_prefill_done[current_id] = False
             # Initialize encoder sequence length to -1 (not set)
             self.encoder_seq_lengths[current_id] = -1
+            # Store encoder prompt tokens for retrieval during encoder prefill
+            self._encoder_prompt_tokens[req.request_id] = req.encoder_prompt_tokens
 
         self.active_token_count += chunk_length
         self.total_request_count += 0 if req.finished_chunk_token_count > 0 else 1

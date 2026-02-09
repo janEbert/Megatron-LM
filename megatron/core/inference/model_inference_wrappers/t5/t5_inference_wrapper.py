@@ -211,7 +211,7 @@ class T5InferenceWrapper(AbstractModelInferenceWrapper):
             decoder_mask,
             encoder_decoder_mask,
             output_encoder_hidden_only=True,
-            inference_context=self.inference_context,
+            inference_context=None,
         )
 
         return encoder_hidden_states

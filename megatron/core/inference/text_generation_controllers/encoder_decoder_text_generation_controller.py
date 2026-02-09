@@ -131,18 +131,14 @@ class EncoderDecoderTextGenerationController(TextGenerationController):
 
                 for idx in pending_indexes:
                     req_id = context.request_ids[idx].item()
-                    # Find the request in active_requests
-                    for req_key, req in self.active_requests.items():
-                        if req.request_id == req_id:
-                            encoder_tokens = req.encoder_prompt_tokens
-                            if encoder_tokens is not None:
-                                encoder_tokens_list.append(encoder_tokens)
-                                max_encoder_len = max(max_encoder_len, len(encoder_tokens))
-                                # Create mask for encoder (False = valid token)
-                                encoder_mask_list.append(
-                                    torch.zeros(len(encoder_tokens), dtype=torch.bool)
-                                )
-                            break
+                    encoder_tokens = context.pop_encoder_prompt_tokens(req_id)
+                    if encoder_tokens is not None:
+                        encoder_tokens_list.append(encoder_tokens)
+                        max_encoder_len = max(max_encoder_len, len(encoder_tokens))
+                        # Create mask for encoder (False = valid token)
+                        encoder_mask_list.append(
+                            torch.zeros(len(encoder_tokens), dtype=torch.bool)
+                        )
 
                 if encoder_tokens_list:
                     # Pad encoder tokens to uniform length
