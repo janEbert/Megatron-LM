@@ -12,7 +12,7 @@ import torch
 
 from megatron.core.datasets.blended_megatron_dataset_config import BlendedMegatronDatasetConfig
 from megatron.core.datasets.indexed_dataset import IndexedDataset
-from megatron.core.datasets.megatron_dataset import MegatronDataset
+from megatron.core.datasets.megatron_dataset import LowLevelDataset, MegatronDataset
 from megatron.core.datasets.utils import Split
 from megatron.core.utils import log_single_rank
 
@@ -23,25 +23,25 @@ logger = logging.getLogger(__name__)
 class MaskedWordPieceDatasetConfig(BlendedMegatronDatasetConfig):
     """Configuration object for Megatron Core Masked WordPiece datasets"""
 
-    masking_probability: float = None
+    masking_probability: Optional[float] = None
     """The probability we mask a candidate N-gram"""
 
-    short_sequence_probability: float = None
+    short_sequence_probability: Optional[float] = None
     """The probability we return a sequence shorter than the target sequence length"""
 
-    masking_max_ngram: int = None
+    masking_max_ngram: Optional[int] = None
     """The maximum length N-gram to consider masking or permuting"""
 
-    masking_do_full_word: bool = None
+    masking_do_full_word: Optional[bool] = None
     """Whether we mask the whole word or its component parts"""
 
-    masking_do_permutation: bool = None
+    masking_do_permutation: Optional[bool] = None
     """Whether we shuffle a subset of candidate N-grams in addition"""
 
-    masking_use_longer_ngrams: bool = None
+    masking_use_longer_ngrams: Optional[bool] = None
     """Whether to favor longer N-grams over shorter N-grams"""
 
-    masking_use_geometric_distribution: bool = None
+    masking_use_geometric_distribution: Optional[bool] = None
     """Whether to draw the size of the N-gram from a geometric distribution according to SpanBERT
        https://arxiv.org/abs/1907.10529 (Section 3.1)
     """
@@ -113,31 +113,33 @@ class MaskedWordPieceDataset(MegatronDataset):
         )
 
     @staticmethod
-    def numel_low_level_dataset(low_level_dataset: IndexedDataset) -> int:
+    def numel_low_level_dataset(low_level_dataset: LowLevelDataset) -> int:
         """Return the number of documents in the underlying low level dataset.
 
         Args:
-            low_level_dataset (IndexedDataset): The underlying IndexedDataset
+            low_level_dataset (LowLevelDataset): The underlying IndexedDataset
 
         Returns:
             int: The number of unique elements in the underlying IndexedDataset
         """
+        assert isinstance(low_level_dataset, IndexedDataset)
         return low_level_dataset.document_indices.shape[0] - 1
 
     @staticmethod
     def build_low_level_dataset(
-        dataset_path: str, config: MaskedWordPieceDatasetConfig
+        dataset_path: str, config: BlendedMegatronDatasetConfig
     ) -> IndexedDataset:
         """Build the low level dataset (IndexedDataset) from the given path.
 
         Args:
             dataset_path (str): The real path prefix to the IndexedDataset .bin and .idx files
 
-            config (MaskedWordPieceDatasetConfig): The config
+            config (BlendedMegatronDatasetConfig): The MaskedWordPieceDatasetConfig
 
         Returns:
             IndexedDataset: The underlying IndexedDataset
         """
+        assert isinstance(config, MaskedWordPieceDatasetConfig)
         return IndexedDataset(dataset_path)
 
     @staticmethod

@@ -12,7 +12,7 @@ import shutil
 import struct
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from enum import Enum
 from functools import lru_cache
@@ -174,9 +174,9 @@ class _IndexWriter(object):
 
     def write(
         self,
-        sequence_lengths: Iterable[Union[int, numpy.integer]],
+        sequence_lengths: Sequence[Union[int, numpy.integer]],
         sequence_modes: Optional[Iterable[Union[int, numpy.integer]]],
-        document_indices: Iterable[Union[int, numpy.integer]],
+        document_indices: Sequence[Union[int, numpy.integer]],
     ) -> None:
         """Write the index (.idx) file
 
@@ -240,7 +240,7 @@ class _IndexReader(object):
 
         sequences_per_dataset (Optional[Tuple[int, int]]): The sequences per dataset.
 
-        dtype_code (int): The dtype code of the tokenized documents.
+        dtype_code (Optional[int]): The dtype code of the tokenized documents.
     """
 
     def __init__(
@@ -248,11 +248,12 @@ class _IndexReader(object):
         idx_path: str,
         multimodal: bool,
         sequences_per_dataset: Optional[Tuple[int, int]] = None,
-        dtype_code: int = None,
+        dtype_code: Optional[int] = None,
     ) -> None:
         log_single_rank(logger, logging.INFO, f"Load the {type(self).__name__} from {idx_path}")
 
         if sequences_per_dataset:
+            assert dtype_code is not None
             self.dtype = DType.dtype_from_code(dtype_code)
             self.dtype_size = DType.size(self.dtype)
             self.sequence_count = sequences_per_dataset[0]
@@ -336,7 +337,7 @@ class _IndexReader(object):
     def __del__(self) -> None:
         """Clean up the object"""
         if hasattr(self, "bin_buffer_mmap"):
-            self.bin_buffer_mmap._mmap.close()  # type: ignore[attr-defined]
+            self.bin_buffer_mmap._mmap.close()
             del self.bin_buffer_mmap
 
     def __len__(self) -> int:
@@ -421,7 +422,7 @@ class _MMapBinReader(_BinReader):
     def __del__(self) -> None:
         """Clean up the object."""
         if self._bin_buffer_mmap is not None:
-            self._bin_buffer_mmap._mmap.close()  # type: ignore[attr-defined]
+            self._bin_buffer_mmap._mmap.close()
         if self._bin_file_reader is not None:
             self._bin_file_reader.close()
         del self._bin_buffer_mmap
@@ -628,7 +629,7 @@ class IndexedDataset(torch.utils.data.Dataset):
 
         sequences_per_dataset (Optional[Tuple[int, int]]): The sequences per dataset.
 
-        dtype_code (int): The dtype code of the tokenized documents.
+        dtype_code (Optional[int]): The dtype code of the tokenized documents.
     """
 
     def __init__(
@@ -640,7 +641,7 @@ class IndexedDataset(torch.utils.data.Dataset):
         s3_config: Optional[S3Config] = None,
         fast_cache_load: bool = False,
         sequences_per_dataset: Optional[Tuple[int, int]] = None,
-        dtype_code: int = None,
+        dtype_code: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.path_prefix: str
@@ -683,7 +684,7 @@ class IndexedDataset(torch.utils.data.Dataset):
         object_storage_config: Optional[ObjectStorageConfig],
         fast_cache_load: bool = False,
         sequences_per_dataset: Optional[Tuple[int, int]] = None,
-        dtype_code: int = None,
+        dtype_code: Optional[int] = None,
     ) -> None:
         """Initialize the dataset
 
@@ -704,7 +705,7 @@ class IndexedDataset(torch.utils.data.Dataset):
 
             sequences_per_dataset (Optional[Tuple[int, int]]): The sequences per dataset.
 
-            dtype_code (int): The dtype code of the tokenized documents.
+            dtype_code (Optional[int]): The dtype code of the tokenized documents.
         """
         idx_path = get_idx_path(path_prefix)
         bin_path = get_bin_path(path_prefix)
@@ -733,11 +734,13 @@ class IndexedDataset(torch.utils.data.Dataset):
             self.bin_reader = _FileBinReader(bin_path)
         self.index = _IndexReader(idx_path, self.multimodal, sequences_per_dataset, dtype_code)
 
-    def __getstate__(self) -> Tuple[str, bool, bool, Optional[ObjectStorageConfig]]:
+    def __getstate__(
+        self,
+    ) -> Tuple[str, bool, bool, Optional[ObjectStorageConfig], bool, Optional[Tuple[int, int]], Optional[int]]:
         """Get the state during pickling
 
         Returns:
-            Tuple[str, bool, bool, Optional[ObjectStorageConfig]]: The state tuple
+            Tuple[str, bool, bool, Optional[ObjectStorageConfig], bool, Optional[Tuple[int, int]], Optional[int]]: The state tuple
         """
         return (
             self.path_prefix,
@@ -749,11 +752,14 @@ class IndexedDataset(torch.utils.data.Dataset):
             self.dtype_code,
         )
 
-    def __setstate__(self, state: Tuple[str, bool, bool, Optional[ObjectStorageConfig]]) -> None:
+    def __setstate__(
+        self,
+        state: Tuple[str, bool, bool, Optional[ObjectStorageConfig], bool, Optional[Tuple[int, int]], Optional[int]],
+    ) -> None:
         """Set the state during un-pickling
 
         Args:
-            state (Tuple[str, bool, bool, Optional[ObjectStorageConfig]]): The state tuple
+            state (Tuple[str, bool, bool, Optional[ObjectStorageConfig], bool, Optional[Tuple[int, int]], Optional[int]]): The state tuple
         """
         (
             path_prefix,
@@ -824,9 +830,7 @@ class IndexedDataset(torch.utils.data.Dataset):
             if step != 1:
                 raise ValueError("Slices into indexed_dataset must be contiguous")
             sequence_lengths = self.index.sequence_lengths[idx]
-            sequence_modes = (
-                self.index.sequence_modes[idx] if self.multimodal else None  # type: ignore[index]
-            )
+            sequence_modes = self.index.sequence_modes[idx] if self.multimodal else None
             sequence_offsets = list(accumulate(sequence_lengths))
             sequences = numpy.split(
                 self.bin_reader.read(
@@ -958,9 +962,9 @@ class IndexedDatasetBuilder(object):
         self.dtype = dtype
         self.multimodal = multimodal
 
-        self.sequence_lengths = []
+        self.sequence_lengths: List[int] = []
         self.document_indices = [0]
-        self.sequence_modes = [] if self.multimodal else None
+        self.sequence_modes: Optional[List[int]] = [] if self.multimodal else None
 
     def add_item(self, tensor: torch.Tensor, mode: int = 0) -> None:
         """Add a single item to the dataset
@@ -974,6 +978,7 @@ class IndexedDatasetBuilder(object):
         self.data_file.write(np_array.tobytes(order="C"))
         self.sequence_lengths.append(np_array.size)
         if self.multimodal:
+            assert self.sequence_modes is not None
             self.sequence_modes.append(mode)
 
     def add_document(
@@ -994,7 +999,8 @@ class IndexedDatasetBuilder(object):
         self.sequence_lengths.extend(lengths)
         self.document_indices.append(len(self.sequence_lengths))
         if self.multimodal:
-            self.sequence_modes.extend(modes if modes is not None else [0] * lengths)
+            assert self.sequence_modes is not None
+            self.sequence_modes.extend(modes if modes is not None else [0] * len(lengths))
 
     def end_document(self) -> None:
         """Finalize the document, for use with IndexedDatasetBuilder.add_item"""
@@ -1015,6 +1021,7 @@ class IndexedDatasetBuilder(object):
         self.document_indices.extend((offset + index.document_indices)[1:])
 
         if self.multimodal:
+            assert self.sequence_modes is not None
             assert index.sequence_modes is not None, "sequence_modes cannot not be None"
             self.sequence_modes.extend(index.sequence_modes)
 

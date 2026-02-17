@@ -45,7 +45,7 @@ class BlendedMegatronDatasetConfig:
        from a single distribution. Not to be used with 'blend_per_split'.  Defaults to None.
     """
 
-    split_matrix: Optional[List[Tuple[float, float]]] = field(init=False, default=None)
+    split_matrix: Optional[List[Optional[Tuple[float, float]]]] = field(init=False, default=None)
     """The split matrix consisting of non-overlapping book-ends of each split in order. For more
        information, refer to 'convert_split_vector_to_split_matrix'. Created automatically from
        'split'. Not to be passed in to the constructor.
@@ -161,7 +161,7 @@ def parse_and_normalize_split(split: str) -> List[float]:
     Returns:
         List[float]: The trian valid test split ratios e.g. [0.99, 0.01, 0.0]
     """
-    split = list(map(float, re.findall(r"[.0-9]+", split)))
+    split: List[float] = list(map(float, re.findall(r"[.0-9]+", split)))
     split = split + [0.0 for _ in range(len(Split) - len(split))]
 
     assert len(split) == len(Split)
@@ -195,11 +195,11 @@ def convert_split_vector_to_split_matrix(
     if vector_b is None:
         vector_b = vector_a
 
-    # [.900, .090, .010] -> [0.00, .900, .990, 100]
-    expansion_a = functools.reduce(lambda a, b: a + [a[len(a) - 1] + b], [[0], *vector_a])
-    expansion_b = functools.reduce(lambda a, b: a + [a[len(a) - 1] + b], [[0], *vector_b])
+    # # [.900, .090, .010] -> [0.00, .900, .990, 1.0]
+    expansion_a = functools.reduce(lambda a, b: a + [a[len(a) - 1] + b], vector_a, [0.0])
+    expansion_b = functools.reduce(lambda a, b: a + [a[len(a) - 1] + b], vector_b, [0.0])
 
-    # [0.00, .900, .990, 100.0] -> [(0.00, .900), (.900, .990), (.990, 100)]
+    # [0.00, .900, .990, 1.0] -> [(0.00, .900), (.900, .990), (.990, 1.0)]
     bookends_a = list(zip(expansion_a[:-1], expansion_a[1:]))
     bookends_b = list(zip(expansion_b[:-1], expansion_b[1:]))
 

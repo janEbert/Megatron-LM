@@ -1,6 +1,6 @@
 # Copyright (c) 2025 NVIDIA CORPORATION.  All rights reserved.
 
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 import torch
 
@@ -52,7 +52,7 @@ class HybridCPDataLoaderWrapper:
         """Return self as an iterator."""
         return self
 
-    def get_global_seqlens(self, subsample_seqlens: torch.Tensor) -> List[int]:
+    def get_global_seqlens(self, subsample_seqlens: torch.Tensor) -> Tuple[List[int], torch.Tensor]:
         """
         Gathers the sequence lengths of all subsamples from all DP ranks.
         Each DP rank loads the same number of microbatches but each microbatch
@@ -123,7 +123,7 @@ class HybridCPDataLoaderWrapper:
 
         return global_id_seqlens, global_ids_this_rank
 
-    def _gid_to_src_rank(self, gid: int, offsets: List[int]) -> int:
+    def _gid_to_src_rank(self, gid: int, offsets: torch.Tensor) -> int:
         dp_src_rank = torch.bucketize(gid, offsets[1:] - 1)
         # Since the torch.distributed.get_process_group_ranks
         # provides the global rank, we need to consider TP

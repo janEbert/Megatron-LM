@@ -12,7 +12,7 @@ import torch
 
 from megatron.core.datasets.blended_megatron_dataset_config import BlendedMegatronDatasetConfig
 from megatron.core.datasets.indexed_dataset import IndexedDataset
-from megatron.core.datasets.megatron_dataset import MegatronDataset
+from megatron.core.datasets.megatron_dataset import LowLevelDataset, MegatronDataset
 from megatron.core.datasets.object_storage_utils import ObjectStorageConfig, is_object_storage_path
 from megatron.core.datasets.utils import Split
 from megatron.core.tokenizers import MegatronTokenizerBase
@@ -68,8 +68,8 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
     data parallel size * context parallel size * sequence parallel size * 2.
     """
 
-    sequences_per_dataset: Optional[Dict[str, int]] = None
-    """If provided, the sequence and document counts for each dataset. 
+    sequences_per_dataset: Optional[Dict[str, Tuple[int, int]]] = None
+    """If provided, the sequence and document counts for each dataset.
        Check --per-dataset-sequences-path
     """
 
@@ -148,32 +148,36 @@ class GPTDataset(MegatronDataset):
         )
 
     @staticmethod
-    def numel_low_level_dataset(low_level_dataset: IndexedDataset) -> int:
+    def numel_low_level_dataset(low_level_dataset: LowLevelDataset) -> int:
         """Abstract method implementation
 
         For GPT, the underlying IndexedDataset should be split by sequence, as opposed to, say,
         BERT, which should be split by document
 
         Args:
-            low_level_dataset (IndexedDataset): The underlying IndexedDataset
+            low_level_dataset (LowLevelDataset): The underlying IndexedDataset
 
         Returns:
             int: The number of unique elements in the underlying IndexedDataset
         """
+        assert isinstance(low_level_dataset, IndexedDataset)
         return low_level_dataset.sequence_lengths.shape[0]
 
     @staticmethod
-    def build_low_level_dataset(dataset_path: str, config: GPTDatasetConfig) -> IndexedDataset:
+    def build_low_level_dataset(
+            dataset_path: str, config: BlendedMegatronDatasetConfig
+    ) -> IndexedDataset:
         """Abstract method implementation
 
         Args:
             dataset_path (str): The real path prefix to the IndexedDataset .bin and .idx files
 
-            config (GPTDatasetConfig): The config
+            config (BlendedMegatronDatasetConfig): The GPTDatasetConfig
 
         Returns:
             IndexedDataset: The underlying IndexedDataset
         """
+        assert isinstance(config, GPTDatasetConfig)
         if is_object_storage_path(dataset_path):
             assert config.object_storage_cache_path is not None
             return IndexedDataset(
@@ -805,6 +809,7 @@ class MockGPTLowLevelDataset:
 
     def __init__(self, tokenizer: MegatronTokenizerBase) -> None:
         self.vocab_size = tokenizer.vocab_size
+        assert hasattr(tokenizer, "eod") and isinstance(tokenizer.eod, int)
         self.eod_token = tokenizer.eod
         rng = numpy.random.default_rng(seed=self.seed)
         self.sequence_lengths = rng.integers(
@@ -878,15 +883,16 @@ class MockGPTDataset(GPTDataset):
         )
 
     @staticmethod
-    def numel_low_level_dataset(low_level_dataset: MockGPTLowLevelDataset) -> int:
+    def numel_low_level_dataset(low_level_dataset: LowLevelDataset) -> int:
         """Abstract method implementation
 
         Args:
-            low_level_dataset (MockGPTLowLevelDataset): The underlying MockGPTLowLevelDataset
+            low_level_dataset (LowLevelDataset): The underlying MockGPTLowLevelDataset
 
         Returns:
             int: The number of unique elements in the underlying MockGPTLowLevelDataset
         """
+        assert isinstance(low_level_dataset, MockGPTLowLevelDataset)
         return len(low_level_dataset)
 
     @staticmethod
@@ -904,4 +910,5 @@ class MockGPTDataset(GPTDataset):
         Returns:
             MockGPTLowLevelDataset: The underlying MockGPTLowLevelDataset
         """
+        assert config.tokenizer is not None
         return MockGPTLowLevelDataset(config.tokenizer)

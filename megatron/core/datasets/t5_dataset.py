@@ -30,7 +30,7 @@ class T5MaskedWordPieceDatasetConfig(MaskedWordPieceDatasetConfig):
     sequence_length_encoder: Optional[int] = field(init=False, default=None)
     """A sequence_length alias and the sequence length for the encoder"""
 
-    sequence_length_decoder: int = None
+    sequence_length_decoder: Optional[int] = None
     """The sequence length for the decoder"""
 
     def __post_init__(self) -> None:
@@ -42,6 +42,16 @@ class T5MaskedWordPieceDatasetConfig(MaskedWordPieceDatasetConfig):
         assert self.sequence_length_encoder is not None
         assert self.sequence_length_decoder is not None
 
+        # While we already check for not being `None` in `super().__post_init__`, we need to
+        # constrain further here since `MegatronTokenizerBase` does not have an
+        # `additional_special_tokens_ids` attribute. We cannot just constrain to
+        # `MegatronTokenizerText` since other tokenizers that do _not_ subclass from it do _have_
+        # the `additional_special_tokens_ids`.
+        assert hasattr(self.tokenizer, "additional_special_tokens_ids"), \
+            "Your tokenizer needs to support additional special tokens"
+        # This attribute could be `None` in some cases/classes, which we treat as an error, since
+        # empty lists would not be allowed either.
+        assert isinstance(self.tokenizer.additional_special_tokens_ids, list)
         assert len(self.tokenizer.additional_special_tokens_ids) > 0
 
 
@@ -131,7 +141,7 @@ class T5MaskedWordPieceDataset(MaskedWordPieceDataset):
         encoder_mask: torch.tensor,
         decoder_mask: torch.tensor,
         use_local: bool = False,
-        test_te_version: str = None,
+        test_te_version: Optional[str] = None,
     ) -> torch.tensor:
         """Config attention-mask for encoder_mask, decoder_mask, encoder_decoder_mask
         conditioned on transformer-implementation (e.g. TE vs local), TE versions,
@@ -143,8 +153,9 @@ class T5MaskedWordPieceDataset(MaskedWordPieceDataset):
             encoder_mask (torch.tensor): A 2-D array of tokens (bs, kv_len)
             decoder_mask (torch.tensor): A 2-D array of tokens (bs, q_len)
             use_local (bool): Whether the current T5 model uses local (vs TE)
-                transformer implmentation
-            test_te_version (str): The Transformer Engine version to test against. Defaults to None.
+                transformer implementation
+            test_te_version (Optional[str]): The Transformer Engine version to test against.
+                Defaults to None.
 
         Returns:
             Configured encoder_mask, decoder_mask, encoder_decoder_mask

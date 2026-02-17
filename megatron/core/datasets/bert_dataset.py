@@ -17,7 +17,7 @@ from megatron.core.datasets.utils import Split
 class BERTMaskedWordPieceDatasetConfig(MaskedWordPieceDatasetConfig):
     """Configuration object for Megatron Core BERT WordPiece datasets"""
 
-    classification_head: bool = None
+    classification_head: Optional[bool] = None
     """Option to perform the next sequence prediction during sampling"""
 
     def __post_init__(self) -> None:

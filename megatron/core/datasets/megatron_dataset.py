@@ -5,7 +5,7 @@ import json
 import warnings
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from typing import Dict, Iterable, List, Optional, Union
+from typing import cast, Dict, Iterable, List, Optional, Union
 
 import numpy
 import torch
@@ -72,12 +72,22 @@ class MegatronDataset(ABC, torch.utils.data.Dataset):
 
         # Handle pad token id provided by the tokenizer
         try:
+            assert (
+                self.config.tokenizer is not None
+                and hasattr(self.config.tokenizer, "pad")
+                and isinstance(self.config.tokenizer.pad, int)
+            )
             self._pad_token_id = self.config.tokenizer.pad
         except Exception:
             self._pad_token_id = _PAD_TOKEN_ID
 
         # Check if pad token id collides with any other special tokens
         try:
+            assert (
+                self.config.tokenizer is not None
+                and hasattr(self.config.tokenizer, "special_tokens_dict")
+                and isinstance(self.config.tokenizer.special_tokens_dict, dict)
+            )
             _special_tokens_list = [
                 v for k, v in self.config.tokenizer.special_tokens_dict.items() if k != "pad_token"
             ]
@@ -86,10 +96,20 @@ class MegatronDataset(ABC, torch.utils.data.Dataset):
         # If the tokenizer does not have a special_tokens_dict attribute, at least check eos and eod
         if not _special_tokens_list:
             try:
+                assert (
+                    self.config.tokenizer is not None
+                    and hasattr(self.config.tokenizer, "eos")
+                    and isinstance(self.config.tokenizer.eos, int)
+                )
                 _special_tokens_list.append(self.config.tokenizer.eos)
             except (AttributeError, NotImplementedError):
                 pass
             try:
+                assert (
+                    self.config.tokenizer is not None
+                    and hasattr(self.config.tokenizer, "eod")
+                    and isinstance(self.config.tokenizer.eod, int)
+                )
                 _special_tokens_list.append(self.config.tokenizer.eod)
             except (AttributeError, NotImplementedError):
                 pass

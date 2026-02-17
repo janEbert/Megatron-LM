@@ -148,7 +148,7 @@ def _s3_object_exists(client: S3Client, path: str) -> bool:
     """
     parsed_s3_path = parse_s3_path(path)
     try:
-        _ = client.head_object(bucket=parsed_s3_path[0], key=parsed_s3_path[1])
+        _ = client.head_object(Bucket=parsed_s3_path[0], Key=parsed_s3_path[1])
     except exceptions.ClientError as e:
         if e.response["Error"]["Code"] != "404":
             raise e

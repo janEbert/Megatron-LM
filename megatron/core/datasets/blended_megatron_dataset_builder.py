@@ -3,7 +3,7 @@
 import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Iterable, List, Optional, Type, Union
+from typing import Any, Callable, cast, Iterable, List, Optional, Tuple, Type, Union
 
 import numpy
 import torch
@@ -45,7 +45,7 @@ class BlendedMegatronDatasetBuilder(object):
     def __init__(
         self,
         cls: Type[MidLevelDataset],
-        sizes: List[int],
+        sizes: List[Optional[int]],
         is_built_on_rank: Callable,
         config: BlendedMegatronDatasetConfig,
     ):
@@ -64,6 +64,7 @@ class BlendedMegatronDatasetBuilder(object):
             for split in Split:
                 size_is_none = self.sizes[split.value] is None
                 if self.config.blend_per_split is None:
+                    assert self.config.blend is not None
                     weights_are_none = self.config.blend[1] is None
                 else:
                     if self.config.blend_per_split[split.value] is None:
@@ -148,6 +149,7 @@ class BlendedMegatronDatasetBuilder(object):
         if self.config.mock:
             split = self.config.split_matrix
             try:
+                assert split is not None
                 return self._build_megatron_dataset_splits(None, split, self.sizes)
             except Exception as error:
                 raise Exception(
@@ -163,6 +165,7 @@ class BlendedMegatronDatasetBuilder(object):
                 weights = normalize(weights)
 
             split = self.config.split_matrix
+            assert split is not None
 
             # Blend consists of a single prefix
             if len(prefixes) == 1 and weights is None:
@@ -173,12 +176,17 @@ class BlendedMegatronDatasetBuilder(object):
                 # Build only one "epoch"
                 sizes_per_dataset_buffer = [[None for split in Split] for prefix in prefixes]
             else:
+                # We perform this check to safely cast `self.sizes` from `List[Optional[int]]` to
+                # `List[int]` below.
+                assert all(x is not None for x in self.sizes)
                 # The number of samples we plan to use per dataset
-                sizes_per_dataset_target = _get_size_per_split_per_dataset(weights, self.sizes)
+                sizes_per_dataset_target = _get_size_per_split_per_dataset(weights, cast(List[int], self.sizes))
                 # The number of samples we plan to build per dataset
                 sizes_per_dataset_buffer = _get_size_per_split_per_dataset(
-                    weights, self.sizes, surplus=self.config.mid_level_dataset_surplus
+                    weights, cast(List[int], self.sizes), surplus=self.config.mid_level_dataset_surplus
                 )
+                # We can safely convert a `List[List[int]]` to a `List[List[Optional[int]]]`.
+                sizes_per_dataset_buffer = cast(List[List[Optional[int]]], sizes_per_dataset_buffer)
 
             # Build each dataset in parallel
             megatron_datasets = self._build_megatron_datasets_parallel(
@@ -198,12 +206,15 @@ class BlendedMegatronDatasetBuilder(object):
                         # Blend according to dataset sizes as-is and (maybe) client-specified size
                         try:
                             weights_i = [
-                                len(megatron_dataset) for megatron_dataset in megatron_datasets[i]
+                                # We handle the case that `MegatronDataset` is `None` using the
+                                # `TypeError` handler below.
+                                len(cast(MegatronDataset, megatron_dataset)) for megatron_dataset in megatron_datasets[i]
                             ]
                         except TypeError:
                             weights_i = [0 for _ in prefixes]
-                        if self.sizes[i] is not None:
-                            size_i = min(self.sizes[i], sum(weights_i))
+                        size_i = self.sizes[i]
+                        if size_i is not None:
+                            size_i = min(size_i, sum(weights_i))
                         else:
                             # Build exhaustive indices
                             size_i = None
@@ -242,6 +253,7 @@ class BlendedMegatronDatasetBuilder(object):
                 sizes_spoof[i] = self.sizes[i]
 
                 # Blend is provided for the split
+                assert self.config.blend_per_split is not None
                 blend = self.config.blend_per_split[i]
                 if blend is not None:
                     prefixes, weights = blend
@@ -283,6 +295,9 @@ class BlendedMegatronDatasetBuilder(object):
                         sizes_per_dataset_buffer = _get_size_per_split_per_dataset(
                             weights, sizes_spoof, surplus=self.config.mid_level_dataset_surplus
                         )
+                        # We can safely convert a `List[List[int]]` to a
+                        # `List[List[Optional[int]]]`.
+                        sizes_per_dataset_buffer = cast(List[List[Optional[int]]], sizes_per_dataset_buffer)
 
                     # Build each dataset in parallel
                     megatron_datasets = self._build_megatron_datasets_parallel(
@@ -298,12 +313,15 @@ class BlendedMegatronDatasetBuilder(object):
                         # Blend according to dataset sizes as-is and (maybe) client-specified size
                         try:
                             weights = [
-                                len(megatron_dataset) for megatron_dataset in megatron_datasets
+                                # We handle the case that `MegatronDataset` is `None` using the
+                                # `TypeError` handler below.
+                                len(cast(MegatronDataset, megatron_dataset)) for megatron_dataset in megatron_datasets
                             ]
                         except TypeError:
                             weights = [0 for _ in prefixes]
-                        if self.sizes[i] is not None:
-                            size = min(self.sizes[i], sum(weights))
+                        size = self.sizes[i]
+                        if size is not None:
+                            size = min(size, sum(weights))
                         else:
                             # Build exhaustive indices
                             size = None
@@ -329,16 +347,16 @@ class BlendedMegatronDatasetBuilder(object):
             return blended_datasets
 
     def _build_megatron_datasets_parallel(
-        self, prefixes: List[str], split: List[float], sizes_per_dataset: List[List[int]]
+        self, prefixes: List[str], split: List[Optional[Tuple[float, float]]], sizes_per_dataset: List[List[Optional[int]]]
     ) -> List[List[Optional[MegatronDataset]]]:
         """Build the megatron datasets for a list of prefixes in parallel
 
         Args:
             prefixes (List[str]): The list of prefix strings
 
-            split (List[float]): The dataset split ratios (must sum to 1.00)
+            split (List[Optional[Tuple[float, float]]]): The dataset split ratios (must sum to 1.00)
 
-            sizes_per_dataset (List[List[int]]): The number of samples to request
+            sizes_per_dataset (List[List[Optional[int]]]): The number of samples to request
             per MegatronDataset per spilt
 
         Returns:
@@ -351,8 +369,8 @@ class BlendedMegatronDatasetBuilder(object):
             megatron_datasets: List[List[Optional[MegatronDataset]]],
             num_workers: int,
             prefixes: List[str],
-            split: List[float],
-            sizes_per_dataset: List[List[int]],
+            split: List[Optional[Tuple[float, float]]],
+            sizes_per_dataset: List[List[Optional[int]]],
         ) -> None:
             with ThreadPoolExecutor(max_workers=num_workers) as executor:
                 all_futures = []
@@ -416,8 +434,8 @@ class BlendedMegatronDatasetBuilder(object):
     def _build_megatron_dataset_splits(
         self,
         dataset_path: Optional[str],
-        split: List[float],
-        sizes: List[int],
+        split: List[Optional[Tuple[float, float]]],
+        sizes: List[Optional[int]],
         synchronize_ranks: bool = True,
     ) -> List[Optional[MidLevelDataset]]:
         """Build each MidLevelDataset split from a single LowLevelDataset
@@ -426,9 +444,9 @@ class BlendedMegatronDatasetBuilder(object):
             dataset_path (Optional[str]): The path on disk which defines the underlying
                 LowLevelDataset, or None for mock dataset classes
 
-            split (List[Tuple[float, float]]): The dataset split matrix
+            split (List[Optional[Tuple[float, float]]]): The dataset split matrix
 
-            sizes (List[int]): The number of total samples to draw from each split
+            sizes (List[Optional[int]]): The number of total samples to draw from each split
 
             synchronize_ranks (bool): Whether to call barrier for rank-0 / barrier / other-ranks
                 behavior. Set to False when we enforce this behavior at higher level.
@@ -451,6 +469,7 @@ class BlendedMegatronDatasetBuilder(object):
                     torch.distributed.barrier()
             return [None] * len(Split)
 
+        assert dataset_path is not None
         # Build the low level dataset
         low_level_dataset = self.cls.build_low_level_dataset(dataset_path, self.config)
 
@@ -460,15 +479,16 @@ class BlendedMegatronDatasetBuilder(object):
         # Build the mid level dataset
         mid_level_datasets = []
         for i, _split in enumerate(Split):
-            if split[i] is None:
+            split_i = split[i]
+            if split_i is None:
                 mid_level_datasets.append(None)
             else:
                 indexed_indices = None
                 if not (
                     isinstance(self.config, GPTDatasetConfig) and self.config.fast_cache_load
                 ):  # NOTE(asolergi-nv): Skip indexed_indices building if we are using --dataloader-fast-cache-load # pylint: disable=C0301
-                    beg = int(round(split[i][0] * float(num_elements)))
-                    end = int(round(split[i][1] * float(num_elements)))
+                    beg = int(round(split_i[0] * float(num_elements)))
+                    end = int(round(split_i[1] * float(num_elements)))
                     indexed_indices = numpy.arange(start=beg, stop=end, step=1, dtype=numpy.int32)
 
                 mid_level_datasets.append(

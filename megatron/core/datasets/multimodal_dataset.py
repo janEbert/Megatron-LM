@@ -1,7 +1,7 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
 from dataclasses import dataclass
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
 import torch
 
@@ -15,10 +15,10 @@ class MultimodalDatasetConfig(GPTDatasetConfig):
     Note: This is unused at the moment and may be missing features. Follow-up changes will use this.
     """
 
-    image_h: int = None
+    image_h: Optional[int] = None
     """Image height."""
 
-    image_w: int = None
+    image_w: Optional[int] = None
     """Image width."""
 
     # Function to preprocess the data sample to a format expected by a specific model. By default, do nothing.
@@ -39,11 +39,11 @@ class MockMultimodalDataset(MockGPTDataset):
     This is unused at the moment and may be missing features. Follow-up changes will use this.
     """
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, idx: Optional[int]) -> Dict[str, torch.Tensor]:
         """Return a sample that contains a dummy image, text sequence and the associated labels and cost and attention masks.
 
         Args:
-            idx (int): The integer seed for mock data generation.
+            idx (Optional[int]): The integer seed for mock data generation.
 
         Returns:
             Dict[str, torch.Tensor]: The mock data.
