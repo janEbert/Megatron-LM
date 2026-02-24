@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from megatron.core import parallel_state
 from megatron.core.dist_checkpointing import ShardedTensor
 from megatron.core.dist_checkpointing.mapping import ReplicaId, ShardedTensorFactory
+from megatron.core.fp8_utils import get_fp8_align_size
 from megatron.core.inference.contexts import BaseInferenceContext, DynamicInferenceContext
 from megatron.core.inference.contexts.attention_context.triton.tensor_ops import (
     tensor_get_slice_after,
@@ -218,9 +219,12 @@ class MambaMixer(MegatronModule):
             self.nheads = self.d_inner // self.headdim
 
         if self.config.fp8:
-            assert (2 * self.d_inner + 2 * self.ngroups * self.d_state + self.nheads) % 16 == 0, (
+            fp8_align_size = get_fp8_align_size(self.config.fp8_recipe)
+            assert (
+                2 * self.d_inner + 2 * self.ngroups * self.d_state + self.nheads
+            ) % fp8_align_size == 0, (
                 "For FP8, the innermost dimension of the Mamba layer "
-                "input projection output tensor must be a multiple of 16."
+                f"input projection output tensor must be a multiple of {fp8_align_size}."
             )
 
         tp_size = self.pg_collection.tp.size()
