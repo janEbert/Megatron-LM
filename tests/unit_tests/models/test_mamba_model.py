@@ -22,7 +22,8 @@ from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer import TransformerConfig
 from megatron.core.transformer.enums import AttnBackend
 from megatron.core.transformer.module import Float16Module
-from megatron.core.utils import divide, is_fa_min_version, is_torch_min_version
+from megatron.core.utils import divide, is_fa_min_version, is_te_min_version, is_torch_min_version
+from megatron.training.utils import get_device_arch_version
 from tests.unit_tests.test_utilities import Utils
 
 
@@ -394,3 +395,79 @@ class TestMambaWithDynamicInference:
 
         # Assert that all padding logits are zero.
         assert torch.all(padding_logits == 0.0), "Logits for padding tokens are not all zero."
+
+
+class TestMambaBlockwiseFP8:
+    """Tests MambaModel with blockwise FP8."""
+
+    @torch.inference_mode()
+    def setup_method(self, method):
+        fp8_available, reason_for_no_fp8 = check_fp8_support()
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+
+        if not is_te_min_version("2.3.0.dev0"):
+            pytest.skip("blockwise FP8 requires TransformerEngine >= 2.3.0.dev0")
+
+        if get_device_arch_version() < 9:
+            pytest.skip("blockwise FP8 requires Hopper architecture (compute capability >= 9.0)")
+
+        Utils.initialize_model_parallel(1, 1)
+        model_parallel_cuda_manual_seed(123)
+
+        model_config = TransformerConfig(
+            num_layers=2,
+            hidden_size=512,
+            num_attention_heads=4,
+            use_cpu_initialization=True,
+            params_dtype=torch.bfloat16,
+            bf16=True,
+            fp8="hybrid",
+            fp8_recipe="blockwise",
+        )
+
+        self.model = MambaModel(
+            config=model_config,
+            mamba_stack_spec=mamba_stack_spec,
+            vocab_size=128,
+            max_sequence_length=16,
+            hybrid_attention_ratio=0.5,
+            hybrid_mlp_ratio=0.0,
+        )
+        self.model = Float16Module(self.model.config, self.model)
+
+    def teardown_method(self, method):
+        Utils.destroy_model_parallel()
+
+    @pytest.mark.internal
+    @torch.inference_mode()
+    def test_blockwise_fp8_forward(self):
+        """
+        Tests that MambaModel can construct and run a forward pass with blockwise FP8.
+        """
+        self.model.cuda()
+        self.model.eval()
+
+        sequence_length = 16
+        micro_batch_size = 2
+
+        # Prepare inputs
+        data = list(range(sequence_length))
+        input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).cuda()
+        position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).cuda()
+        attention_mask = torch.ones(
+            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
+        ).cuda()
+
+        # Run forward pass
+        logits = self.model.forward(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            runtime_gather_output=True,
+        )
+
+        # Verify output shape
+        assert logits.shape[0] == micro_batch_size
+        assert logits.shape[1] == sequence_length
+        assert logits.shape[2] == self.model.module.vocab_size
