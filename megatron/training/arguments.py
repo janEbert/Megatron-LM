@@ -1481,7 +1481,13 @@ def validate_args(args, defaults={}):
 
         assert not args.use_distributed_optimizer, "Muon optimizer does not support distributed optimizer for now."
         assert not args.use_torch_fsdp2, "Muon optimizer does not support Torch-FSDP2 for now."
-        assert not args.use_megatron_fsdp, "Muon optimizer does not support Megatron-FSDP for now."
+        if args.use_megatron_fsdp:
+            assert args.data_parallel_sharding_strategy == 'no_shard', (
+                "Muon optimizer with Megatron-FSDP requires "
+                "--data-parallel-sharding-strategy no_shard. "
+                "ZeRO-1/2/3 (optim/optim_grads/optim_grads_params) support is planned "
+                "but not yet implemented."
+            )
         assert args.ckpt_format in ["torch", "torch_dist"], "Muon optimizer supports torch and torch_dist checkpoint format."
 
     # Optimizer CPU offload check

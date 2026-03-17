@@ -177,7 +177,7 @@ except ImportError:
 from megatron.core.distributed import finalize_model_grads
 from megatron.core.enums import ModelType
 from megatron.core.optimizer import get_megatron_optimizer, AdamOptimizerConfig, SGDOptimizerConfig, OptimizerConfig, ParamKey
-from megatron.core.optimizer.muon import get_megatron_muon_optimizer
+from megatron.core.optimizer.muon import get_megatron_fsdp_muon_optimizer, get_megatron_muon_optimizer
 from megatron.core.rerun_state_machine import (
     get_rerun_state_machine,
     destroy_rerun_state_machine,
@@ -1636,6 +1636,14 @@ def setup_model_and_optimizer(
                 config_overrides=config_overrides,
                 use_gloo_process_groups=args.enable_gloo_process_groups,
                 dump_param_to_param_group_map=args.dump_param_to_param_group_map,
+            )
+        elif args.use_megatron_fsdp:
+            optimizer = get_megatron_fsdp_muon_optimizer(
+                config,
+                model,
+                config_overrides=config_overrides,
+                use_gloo_process_groups=args.enable_gloo_process_groups,
+                layer_wise_distributed_optimizer='dist' in config.optimizer,
             )
         else:
             optimizer = get_megatron_muon_optimizer(
