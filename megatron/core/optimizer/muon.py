@@ -11,7 +11,7 @@ from torch.optim.optimizer import ParamsT
 from megatron.core.optimizer_param_scheduler import ParamGroupOverride
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.module import MegatronModule
-from megatron.core.utils import get_pg_size, log_single_rank
+from megatron.core.utils import get_pg_rank, get_pg_size, log_single_rank
 
 from . import _get_param_groups, get_megatron_optimizer
 from .layer_wise_optimizer import LayerWiseDistributedOptimizer
@@ -169,6 +169,107 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
         else:
             grad = self.scaled_orthogonalize_fn(grad, tp_group, partition_dim)
         return grad
+
+
+class FSDPZeROTensorParallelMuon(TensorParallelMuon):
+    """TensorParallelMuon extended for FSDP ZeRO-1/2/3.
+
+    For ZeRO >= 1, `finish_grad_sync()` reduce-scatters gradients so each DP rank holds
+    only a contiguous row-shard of the full (TP-local) 2D gradient.  Newton-Schulz requires
+    the full matrix.  This class:
+
+      1. Allgathers the DP-sharded momentum across the DP group to reconstruct the
+         TP-local, DP-full gradient matrix.
+      2. Trims FSDP bucket-padding rows using the declared global shape from the DTensor.
+      3. Delegates to ``TensorParallelMuon.orthogonalize()`` which handles the remaining
+         TP dimension (via ``newton_schulz_tp``).
+      4. Extracts the local DP row-shard of the orthogonalized result, zero-padding back
+         to the original shard size for the last rank when FSDP padding is present.
+
+    For ``no_shard`` or single-rank DP, this class falls back transparently to the parent.
+    """
+
+    def __init__(self, params, dp_group=None, **kwargs):
+        self.dp_group = dp_group
+        super().__init__(params, **kwargs)
+
+    def orthogonalize(self, p: torch.Tensor, grad: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+        """Orthogonalize with DP-shard allgather for FSDP ZeRO >= 1."""
+        if self.dp_group is None or get_pg_size(self.dp_group) == 1:
+            return super().orthogonalize(p, grad, **kwargs)
+
+        dp_size = get_pg_size(self.dp_group)
+        dp_rank = get_pg_rank(self.dp_group)
+
+        # The momentum buffer (grad) and param (p) may be Shard(0) DTensors whose
+        # .shape[0] is the *global* row count.  Always extract the local shard tensor
+        # so that shard_rows reflects the actual per-rank row count.
+        try:
+            from torch.distributed.tensor import DTensor as _DTensor
+
+            _have_dtensor = True
+        except ImportError:
+            _DTensor = None  # type: ignore[assignment,misc]
+            _have_dtensor = False
+
+        grad_local = grad.to_local() if (_have_dtensor and isinstance(grad, _DTensor)) else grad
+        shard_rows = grad_local.shape[0]
+
+        # Allgather DP row-shards to reconstruct the TP-local, DP-full gradient matrix.
+        # FSDP guarantees equal shard sizes across all DP ranks (buckets are padded to
+        # dp_size * inner_dim), so a simple all_gather_into_tensor is sufficient.
+        full_grad = torch.empty(
+            shard_rows * dp_size, *grad_local.shape[1:],
+            device=grad_local.device, dtype=grad_local.dtype,
+        )
+        torch.distributed.all_gather_into_tensor(
+            full_grad, grad_local.contiguous(), group=self.dp_group
+        )
+
+        # Trim FSDP bucket-padding rows.
+        # p.shape[0] on a DTensor is the declared full *global* row count (set via
+        # shape=param.shape in from_local).  For TP column-parallel (partition_dim=0):
+        # tp_local_rows = global / tp_size.  For all other params tp_size_dim0 == 1.
+        p_global_rows = (
+            p.shape[0] if (_have_dtensor and isinstance(p, _DTensor)) else shard_rows * dp_size
+        )
+
+        tp_group = (
+            self.pg_collection.expt_tp
+            if getattr(p, 'expert_tp', False)
+            else self.pg_collection.tp
+        ) if self.pg_collection else None
+
+        partition_dim = None if self.mode == "blockwise" else getattr(p, "partition_dim", None)
+        if partition_dim == -1:
+            partition_dim = None
+
+        tp_size_dim0 = get_pg_size(tp_group) if (partition_dim == 0 and tp_group is not None) else 1
+        tp_local_rows = p_global_rows // max(tp_size_dim0, 1)
+
+        full_grad = full_grad[:tp_local_rows]
+
+        # Apply NS to the full TP-local, DP-full gradient.
+        # super().orthogonalize() re-computes tp_group/partition_dim internally, which is
+        # correct: the TP dimension of the reconstructed full_grad is unchanged.
+        orth_full_grad = super().orthogonalize(p, full_grad, **kwargs)
+
+        # Extract the local DP row-shard.  If the last rank had fewer real rows than
+        # shard_rows (FSDP padding), zero-fill the extra rows so padded elements get a
+        # no-op update.
+        start_row = dp_rank * shard_rows
+        end_row = min(start_row + shard_rows, tp_local_rows)
+        orth_shard = orth_full_grad[start_row:end_row]
+
+        if orth_shard.shape[0] < shard_rows:
+            pad_rows = shard_rows - orth_shard.shape[0]
+            pad = torch.zeros(
+                pad_rows, *grad_local.shape[1:],
+                device=grad_local.device, dtype=grad_local.dtype,
+            )
+            orth_shard = torch.cat([orth_shard, pad], dim=0)
+
+        return orth_shard
 
 
 def _get_mfsdp_models(model_chunks):
@@ -334,15 +435,27 @@ def get_megatron_fsdp_muon_optimizer(
                 expert_param_groups.append(group)
                 linear_param_groups.remove(group)
 
-    # With FSDP no_shard, params are fp32 DTensors (Replicate placement).
+    # Choose Muon variant based on the ZeRO sharding strategy.
+    # - no_shard (ZeRO-0): params/grads are full Replicate DTensors; plain TensorParallelMuon.
+    # - optim / optim_grads / optim_grads_params (ZeRO-1/2/3): finish_grad_sync() performs
+    #   reduce_scatter so each rank holds a row-shard of every gradient.  FSDPZeROTensorParallelMuon
+    #   allgathers across the DP group before Newton-Schulz and re-shards the result.
+    fsdp_sharding_strategy = model_chunks[0].ddp_config.data_parallel_sharding_strategy
+    if fsdp_sharding_strategy != 'no_shard':
+        muon_cls = FSDPZeROTensorParallelMuon
+        dp_group = pg_collection.dp_cp
+        muon_kwargs['dp_group'] = dp_group
+    else:
+        muon_cls = TensorParallelMuon
+
     # FP32Optimizer.prepare_grads() guards with hasattr(param, 'main_grad'),
     # which is safe for DTensors that receive grad directly from finish_grad_sync().
-    muon_base = TensorParallelMuon(linear_param_groups, **muon_kwargs)
+    muon_base = muon_cls(linear_param_groups, **muon_kwargs)
     muon_opt = FP32Optimizer(muon_base, config, muon_init_state_fn)
     optimizers = [muon_opt]
 
     if expert_param_groups:
-        expert_muon_base = TensorParallelMuon(expert_param_groups, **muon_kwargs)
+        expert_muon_base = muon_cls(expert_param_groups, **muon_kwargs)
         expert_muon_opt = FP32Optimizer(expert_muon_base, config, muon_init_state_fn)
         setattr(expert_muon_opt, 'grad_stats_parallel_group', pg_collection.tp_ep_pp)
         optimizers.append(expert_muon_opt)
