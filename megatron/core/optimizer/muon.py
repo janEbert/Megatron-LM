@@ -475,8 +475,17 @@ def get_megatron_fsdp_muon_optimizer(
         muon_cls = FSDPZeROTensorParallelMuon
         dp_group = pg_collection.dp_cp
         muon_kwargs['dp_group'] = dp_group
+        log_single_rank(
+            logger, logging.INFO,
+            f'Megatron-FSDP Muon: using FSDPZeROTensorParallelMuon for '
+            f'{fsdp_sharding_strategy} (dp_group size={get_pg_size(dp_group)})'
+        )
     else:
         muon_cls = TensorParallelMuon
+        log_single_rank(
+            logger, logging.INFO,
+            'Megatron-FSDP Muon: using TensorParallelMuon for no_shard (ZeRO-0)'
+        )
 
     # FP32Optimizer.prepare_grads() guards with hasattr(param, 'main_grad'),
     # which is safe for DTensors that receive grad directly from finish_grad_sync().
