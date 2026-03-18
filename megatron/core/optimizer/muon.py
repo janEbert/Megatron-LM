@@ -282,6 +282,20 @@ class FSDPZeROTensorParallelMuon(TensorParallelMuon):
             )
             orth_shard = torch.cat([orth_shard, pad], dim=0)
 
+        # Wrap the plain result back into a DTensor if the input was a DTensor.
+        # OrthogonalizedOptimizer.step() applies the update as p.add_(grad, alpha=-lr).
+        # For a Shard(0) DTensor p, the update tensor must also be a DTensor with
+        # matching placements; a plain tensor would be promoted to Replicate and fail
+        # with a shape mismatch against the global shape.
+        if _have_dtensor and isinstance(grad, _DTensor):
+            orth_shard = _DTensor.from_local(
+                orth_shard.contiguous(),
+                device_mesh=grad.device_mesh,
+                placements=grad.placements,
+                shape=grad.shape,
+                run_check=False,
+            )
+
         return orth_shard
 
 
