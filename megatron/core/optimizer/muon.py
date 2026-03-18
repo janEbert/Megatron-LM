@@ -44,6 +44,14 @@ try:
 except ImportError:
     HAVE_LION = False
 
+try:
+    from torch.distributed.tensor import DTensor as _DTensor
+
+    _HAVE_DTENSOR = True
+except ImportError:
+    _DTensor = None  # type: ignore[assignment,misc]
+    _HAVE_DTENSOR = False
+
 
 logger = logging.getLogger(__name__)
 
@@ -217,15 +225,7 @@ class FSDPZeROTensorParallelMuon(TensorParallelMuon):
         # The momentum buffer (grad) and param (p) may be Shard(0) DTensors whose
         # .shape[0] is the *global* row count.  Always extract the local shard tensor
         # so that shard_rows reflects the actual per-rank row count.
-        try:
-            from torch.distributed.tensor import DTensor as _DTensor
-
-            _have_dtensor = True
-        except ImportError:
-            _DTensor = None  # type: ignore[assignment,misc]
-            _have_dtensor = False
-
-        grad_local = grad.to_local() if (_have_dtensor and isinstance(grad, _DTensor)) else grad
+        grad_local = grad.to_local() if (_HAVE_DTENSOR and isinstance(grad, _DTensor)) else grad
         shard_rows = grad_local.shape[0]
 
         # Allgather DP row-shards to reconstruct the TP-local, DP-full gradient matrix.
@@ -244,7 +244,7 @@ class FSDPZeROTensorParallelMuon(TensorParallelMuon):
         # shape=param.shape in from_local).  For TP column-parallel (partition_dim=0):
         # tp_local_rows = global / tp_size.  For all other params tp_size_dim0 == 1.
         p_global_rows = (
-            p.shape[0] if (_have_dtensor and isinstance(p, _DTensor)) else shard_rows * dp_size
+            p.shape[0] if (_HAVE_DTENSOR and isinstance(p, _DTensor)) else shard_rows * dp_size
         )
 
         tp_group = (
@@ -287,7 +287,7 @@ class FSDPZeROTensorParallelMuon(TensorParallelMuon):
         # For a Shard(0) DTensor p, the update tensor must also be a DTensor with
         # matching placements; a plain tensor would be promoted to Replicate and fail
         # with a shape mismatch against the global shape.
-        if _have_dtensor and isinstance(grad, _DTensor):
+        if _HAVE_DTENSOR and isinstance(grad, _DTensor):
             orth_shard = _DTensor.from_local(
                 orth_shard.contiguous(),
                 device_mesh=grad.device_mesh,
