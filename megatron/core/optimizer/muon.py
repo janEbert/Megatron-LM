@@ -240,13 +240,6 @@ class FSDPZeROTensorParallelMuon(TensorParallelMuon):
         )
 
         # Trim FSDP bucket-padding rows.
-        # p.shape[0] on a DTensor is the declared full *global* row count (set via
-        # shape=param.shape in from_local).  For TP column-parallel (partition_dim=0):
-        # tp_local_rows = global / tp_size.  For all other params tp_size_dim0 == 1.
-        p_global_rows = (
-            p.shape[0] if (_HAVE_DTENSOR and isinstance(p, _DTensor)) else shard_rows * dp_size
-        )
-
         tp_group = (
             self.pg_collection.expt_tp
             if getattr(p, 'expert_tp', False)
@@ -258,7 +251,17 @@ class FSDPZeROTensorParallelMuon(TensorParallelMuon):
             partition_dim = None
 
         tp_size_dim0 = get_pg_size(tp_group) if (partition_dim == 0 and tp_group is not None) else 1
-        tp_local_rows = p_global_rows // max(tp_size_dim0, 1)
+
+        if _HAVE_DTENSOR and isinstance(p, _DTensor):
+            # p.shape[0] is the full *global* row count (declared via shape=param.shape
+            # in make_fsdp_dtensor).  Divide by tp_size_dim0 to get TP-local rows.
+            tp_local_rows = p.shape[0] // max(tp_size_dim0, 1)
+        else:
+            # Non-DTensor fallback (e.g. unit tests with plain tensors):
+            # shard_rows * dp_size is already the TP-local row count after allgather
+            # (the DP shards were produced from the TP-local matrix), so no further
+            # TP division is needed.
+            tp_local_rows = shard_rows * dp_size
 
         full_grad = full_grad[:tp_local_rows]
 
