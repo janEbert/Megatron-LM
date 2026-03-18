@@ -174,17 +174,30 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
 class FSDPZeROTensorParallelMuon(TensorParallelMuon):
     """TensorParallelMuon extended for FSDP ZeRO-1/2/3.
 
-    For ZeRO >= 1, `finish_grad_sync()` reduce-scatters gradients so each DP rank holds
-    only a contiguous row-shard of the full (TP-local) 2D gradient.  Newton-Schulz requires
-    the full matrix.  This class:
+    Supports all three ZeRO sharding strategies:
 
-      1. Allgathers the DP-sharded momentum across the DP group to reconstruct the
+    * ``optim`` (ZeRO-1): optimizer state sharded; grads reduce-scattered.
+    * ``optim_grads`` (ZeRO-2): optimizer state + grads sharded.
+    * ``optim_grads_params`` (ZeRO-3): optimizer state + grads + model params sharded.
+
+    For all three, ``finish_grad_sync()`` reduce-scatters gradients so each DP rank holds
+    only a contiguous ``Shard(0)`` row-shard of the full (TP-local) 2D gradient.
+    Newton-Schulz requires the full matrix.  This class restores that invariant by:
+
+      1. Extracting the local shard tensor via ``.to_local()`` on any Shard(0) DTensor.
+      2. Allgathering the DP row-shards across the DP group to reconstruct the
          TP-local, DP-full gradient matrix.
-      2. Trims FSDP bucket-padding rows using the declared global shape from the DTensor.
-      3. Delegates to ``TensorParallelMuon.orthogonalize()`` which handles the remaining
+      3. Trimming FSDP bucket-padding rows using the declared global shape from the DTensor.
+      4. Delegating to ``TensorParallelMuon.orthogonalize()`` which handles the remaining
          TP dimension (via ``newton_schulz_tp``).
-      4. Extracts the local DP row-shard of the orthogonalized result, zero-padding back
+      5. Extracting the local DP row-shard of the orthogonalized result, zero-padding back
          to the original shard size for the last rank when FSDP padding is present.
+
+    Memory note for ZeRO-3: during each Muon step, a temporary ``full_grad`` buffer of
+    shape ``(tp_local_rows, C)`` is materialized per Muon parameter for the allgather.
+    Peak extra memory ≈ ``3 × (m × n) × sizeof(float32)`` per linear layer
+    (allgather buffer + full NS output + shard padding).  Momentum itself stays sharded
+    (``O(mn / dp_size)`` per rank), the same as the optimizer-state savings from ZeRO-3.
 
     For ``no_shard`` or single-rank DP, this class falls back transparently to the parent.
     """
@@ -294,8 +307,13 @@ class FSDPMuonChainedOptimizer:
 
     Injects the MegatronFSDP step contract around the inner optimizer:
       1. finish_grad_sync()               — waits for async grad sync, attaches grads
+                                            (reduce-scatters for ZeRO-1/2/3,
+                                            allreduces for no_shard)
       2. inner_optimizer.step()           — Muon NS + weight update + Adam
+                                            (FSDPZeROTensorParallelMuon allgathers
+                                            sharded gradients before NS for ZeRO-1/2/3)
       3. install_optimized_model_weights() — copies fp32 main weights → bf16 model weights
+                                            (writes to sharded bf16 buffer for ZeRO-3)
 
     All other attribute accesses are delegated to the inner optimizer via __getattr__,
     making this class transparent to the training loop.
@@ -334,12 +352,23 @@ def get_megatron_fsdp_muon_optimizer(
     layer_wise_distributed_optimizer: bool = False,
     pg_collection: Optional[ProcessGroupCollection] = None,
 ) -> "FSDPMuonChainedOptimizer":
-    """Muon optimizer factory for Megatron-FSDP with the no_shard strategy.
+    """Muon optimizer factory for Megatron-FSDP, supporting all ZeRO strategies.
 
-    With FSDP no_shard, model params are fp32 DTensors with Replicate placement.
-    FP32Optimizer is used instead of Float16OptimizerWithFloat16Params because FSDP
-    attaches param.grad directly via finish_grad_sync(), bypassing the main_grad
-    mechanism that Float16OptimizerWithFloat16Params depends on.
+    Supports all four ``data_parallel_sharding_strategy`` values:
+
+    * ``no_shard`` (ZeRO-0): params/grads are Replicate DTensors; plain
+      ``TensorParallelMuon`` is used — no extra communication.
+    * ``optim`` / ``optim_grads`` / ``optim_grads_params`` (ZeRO-1/2/3):
+      ``finish_grad_sync()`` reduce-scatters gradients into per-rank Shard(0) DTensors.
+      ``FSDPZeROTensorParallelMuon`` allgathers across the DP group before
+      Newton-Schulz, then re-shards the orthogonalized update.
+
+    HSDP (``outer_dp_sharding_strategy != no_shard``) is not supported and is blocked
+    by argument validation in ``arguments.py``.
+
+    ``FP32Optimizer`` is used for all strategies (instead of
+    ``Float16OptimizerWithFloat16Params``) because FSDP attaches gradients directly via
+    ``finish_grad_sync()``, bypassing the ``main_grad`` mechanism.
 
     Args:
         config: Optimizer configuration.
@@ -438,8 +467,9 @@ def get_megatron_fsdp_muon_optimizer(
     # Choose Muon variant based on the ZeRO sharding strategy.
     # - no_shard (ZeRO-0): params/grads are full Replicate DTensors; plain TensorParallelMuon.
     # - optim / optim_grads / optim_grads_params (ZeRO-1/2/3): finish_grad_sync() performs
-    #   reduce_scatter so each rank holds a row-shard of every gradient.  FSDPZeROTensorParallelMuon
-    #   allgathers across the DP group before Newton-Schulz and re-shards the result.
+    #   reduce_scatter so each rank holds a Shard(0) row-shard of every gradient.
+    #   FSDPZeROTensorParallelMuon allgathers across the DP group before Newton-Schulz
+    #   and re-shards the orthogonalized result back to the local row-shard.
     fsdp_sharding_strategy = model_chunks[0].ddp_config.data_parallel_sharding_strategy
     if fsdp_sharding_strategy != 'no_shard':
         muon_cls = FSDPZeROTensorParallelMuon
