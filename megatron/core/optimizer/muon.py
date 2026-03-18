@@ -508,7 +508,12 @@ def get_megatron_fsdp_muon_optimizer(
     optimizers = [muon_opt]
 
     if expert_param_groups:
-        expert_muon_base = muon_cls(expert_param_groups, **muon_kwargs)
+        # Expert params are reduce-scattered over expt_dp (the expert data-parallel group),
+        # NOT dp_cp.  Use the correct group for the allgather in orthogonalize().
+        expert_muon_kwargs = muon_kwargs.copy()
+        if fsdp_sharding_strategy != 'no_shard':
+            expert_muon_kwargs['dp_group'] = pg_collection.expt_dp
+        expert_muon_base = muon_cls(expert_param_groups, **expert_muon_kwargs)
         expert_muon_opt = FP32Optimizer(expert_muon_base, config, muon_init_state_fn)
         setattr(expert_muon_opt, 'grad_stats_parallel_group', pg_collection.tp_ep_pp)
         optimizers.append(expert_muon_opt)
