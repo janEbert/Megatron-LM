@@ -38,10 +38,9 @@ fi
 # Model & Training Parameters
 USE_MEGATRON_FSDP=${USE_MEGATRON_FSDP:-1}
 SHARDING_STRATEGY=${SHARDING_STRATEGY:-"optim_grads_params"}
-OUTER_SHARDING_STRATEGY=${OUTER_SHARDING_STRATEGY:-"no_shard"}
+OUTER_SHARDING_STRATEGY=${OUTER_SHARDING_STRATEGY:-"optim"}
 TP_SIZE=1
 CP_SIZE=1
-PP_SIZE=1
 MICRO_BATCH_SIZE=1
 GLOBAL_BATCH_SIZE=128
 NUM_LAYERS=32
@@ -98,6 +97,7 @@ TRAINING_ARGS=(
     --decoupled-min-lr 4.5e-5
     --lr-decay-style cosine
     --clip-grad 1.0
+    --optimizer adam
     --weight-decay 0.1
     --adam-beta1 0.9
     --adam-beta2 0.95
