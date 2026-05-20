@@ -198,7 +198,7 @@ class MegatronOptimizer(ABC):
         return False
 
     @abstractmethod
-    def step_with_ready_grads(self) -> bool:
+    def step_with_ready_grads(self, update_model_params: bool = True) -> bool:
         """Step the optimizer with ready gradients, return successful."""
         return True
 
@@ -579,7 +579,7 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         return False
 
     @torch.no_grad()
-    def step_with_ready_grads(self) -> bool:
+    def step_with_ready_grads(self, update_model_params: bool = True) -> bool:
         """Step the optimizer with ready gradients, return successful."""
         timers = self.config.timers
         # Step the optimizer.
@@ -593,21 +593,22 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
             timers('optimizer-inner-step').stop()
 
         # Update params from main params.
-        if timers is not None:
-            timers('optimizer-copy-main-to-model-params', log_level=1).start(
-                barrier=self.config.barrier_with_L1_time
-            )
-        if not self.is_stub_optimizer:
-            if self.config.reuse_grad_buf_for_mxfp8_param_ag:
-                # In the case of overlap_param_gather,
-                # copy is manually called in the training loop
-                if not self.config.overlap_param_gather:
-                    self._copy_main_params_to_param_buffer()
-            else:
-                self._copy_main_params_to_model_params()
+        if update_model_params:
+            if timers is not None:
+                timers('optimizer-copy-main-to-model-params', log_level=1).start(
+                    barrier=self.config.barrier_with_L1_time
+                )
+            if not self.is_stub_optimizer:
+                if self.config.reuse_grad_buf_for_mxfp8_param_ag:
+                    # In the case of overlap_param_gather,
+                    # copy is manually called in the training loop
+                    if not self.config.overlap_param_gather:
+                        self._copy_main_params_to_param_buffer()
+                else:
+                    self._copy_main_params_to_model_params()
 
-        if timers is not None:
-            timers('optimizer-copy-main-to-model-params').stop()
+            if timers is not None:
+                timers('optimizer-copy-main-to-model-params').stop()
 
         return True
 
@@ -962,7 +963,7 @@ class FP32Optimizer(MegatronOptimizer):
         return False
 
     @torch.no_grad()
-    def step_with_ready_grads(self) -> bool:
+    def step_with_ready_grads(self, update_model_params: bool = True) -> bool:
         """Step the optimizer with ready gradients, return successful."""
         if self.is_stub_optimizer:
             return True
@@ -1274,15 +1275,63 @@ class ChainedOptimizer(MegatronOptimizer):
 
         return found_inf_flag
 
-    def _step(self) -> bool:
+    def _get_deferred_megatron_fsdp_model_chunks(self) -> list[Any]:
+        """Return Megatron-FSDP model chunks whose weight install can be deferred."""
+        if len(self.chained_optimizers) <= 1:
+            return []
+
+        model_chunks = []
+        seen_model_chunks = set()
+        for optimizer in self.chained_optimizers:
+            for model_chunk in getattr(optimizer, 'model_chunks', []):
+                ddp_config = getattr(model_chunk, 'ddp_config', None)
+                if not getattr(ddp_config, 'use_megatron_fsdp', False):
+                    continue
+                if not hasattr(model_chunk, 'install_optimized_model_weights'):
+                    continue
+                model_chunk_id = id(model_chunk)
+                if model_chunk_id in seen_model_chunks:
+                    continue
+                seen_model_chunks.add(model_chunk_id)
+                model_chunks.append(model_chunk)
+
+        return model_chunks
+
+    def _uses_deferred_megatron_fsdp_weight_install(self, optimizer, model_chunk_ids: set) -> bool:
+        """Check whether an inner optimizer owns model chunks with deferred install."""
+        return any(
+            id(model_chunk) in model_chunk_ids
+            for model_chunk in getattr(optimizer, 'model_chunks', [])
+        )
+
+    def _step(self, update_model_params: bool = True) -> bool:
         """Step all optimizers in this chain."""
+        fsdp_model_chunks = (
+            self._get_deferred_megatron_fsdp_model_chunks() if update_model_params else []
+        )
+        fsdp_model_chunk_ids = {id(model_chunk) for model_chunk in fsdp_model_chunks}
         success = True
         for optimizer_idx, optimizer in enumerate(self.chained_optimizers):
-            success &= optimizer.step_with_ready_grads()
-            if self.config.overlap_param_gather_with_optimizer_step and optimizer_idx == 0:
+            defer_weight_install = (
+                self._uses_deferred_megatron_fsdp_weight_install(optimizer, fsdp_model_chunk_ids)
+                or not update_model_params
+            )
+            success &= optimizer.step_with_ready_grads(update_model_params=not defer_weight_install)
+            if (
+                update_model_params
+                and not fsdp_model_chunks
+                and self.config.overlap_param_gather_with_optimizer_step
+                and optimizer_idx == 0
+            ):
                 assert success
                 assert len(optimizer.model_chunks) == 1
                 optimizer.model_chunks[0].start_param_sync(force_dispatch=True)
+
+        if fsdp_model_chunks and success:
+            for model_chunk in fsdp_model_chunks:
+                model_chunk.install_optimized_model_weights()
+                model_chunk.start_param_sync()
+
         return success
 
     def _should_defer_mxfp8_param_sync(self) -> bool:
@@ -1363,11 +1412,11 @@ class ChainedOptimizer(MegatronOptimizer):
         if timers is not None:
             timers('params-all-gather').stop()
 
-    def _step_with_deferred_mxfp8_param_sync(self) -> bool:
+    def _step_with_deferred_mxfp8_param_sync(self, update_model_params: bool = True) -> bool:
         """Step optimizers with MXFP8 param sync deferred until all steps finish."""
         deferred_bucket_groups = self._enable_deferred_mxfp8_param_sync()
         try:
-            success = self._step()
+            success = self._step(update_model_params=update_model_params)
         finally:
             self._disable_deferred_mxfp8_param_sync()
 
@@ -1377,11 +1426,13 @@ class ChainedOptimizer(MegatronOptimizer):
         return success
 
     @torch.no_grad()
-    def step_with_ready_grads(self) -> bool:
+    def step_with_ready_grads(self, update_model_params: bool = True) -> bool:
         """Step the optimizer with ready gradients, return successful."""
         if self._should_defer_mxfp8_param_sync():
-            return self._step_with_deferred_mxfp8_param_sync()
-        return self._step()
+            return self._step_with_deferred_mxfp8_param_sync(
+                update_model_params=update_model_params
+            )
+        return self._step(update_model_params=update_model_params)
 
     def grads_states_parallel_group_is_shared(self):
         """Check if all optimizers share the same gradient statistics parallel group."""
