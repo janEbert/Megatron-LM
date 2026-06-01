@@ -2535,8 +2535,9 @@ def _add_regularization_args(parser):
                        type=int,
                        default=0,
                        help='When approximate local boundary updates are enabled, only '
-                       'approximate boundary tensors whose local shard has at most this '
-                       'many elements. A value <= 0 disables the cap. Defaults to 0.')
+                       'approximate boundary tensors whose rank-consistent maximum '
+                       'original local shard has at most this many elements. A value <= 0 '
+                       'disables the cap. Defaults to 0.')
     group.add_argument('--muon-fsdp-overlap-local-ns-first',
                        action=argparse.BooleanOptionalAction,
                        default=False,
