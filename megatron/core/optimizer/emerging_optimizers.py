@@ -439,6 +439,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_distributed_ns_gram_refresh_interval: int = 1,
         fsdp_distributed_ns_exclude_qkv: bool = False,
         fsdp_defer_distributed_ns_under_gather: bool = False,
+        fsdp_overlap_local_ns_first: bool = False,
         fsdp_overlap_comm_compute: bool = False,
         fsdp_overlap_defer_boundary_batch_size: int = 1,
         fsdp_batched_newton_schulz: bool = False,
@@ -475,6 +476,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         )
         self.fsdp_distributed_ns_exclude_qkv = fsdp_distributed_ns_exclude_qkv
         self.fsdp_defer_distributed_ns_under_gather = fsdp_defer_distributed_ns_under_gather
+        self.fsdp_overlap_local_ns_first = fsdp_overlap_local_ns_first
         self.fsdp_overlap_comm_compute = fsdp_overlap_comm_compute
         self.fsdp_overlap_defer_boundary_batch_size = max(1, fsdp_overlap_defer_boundary_batch_size)
         self.fsdp_batched_newton_schulz = fsdp_batched_newton_schulz
@@ -666,6 +668,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"boundary_gather_dtype={self.fsdp_boundary_gather_dtype}, "
             f"flat={self.fsdp_flat_batched_all_gather}, "
             f"overlap={self.fsdp_overlap_comm_compute}, "
+            f"overlap_local_ns_first={self.fsdp_overlap_local_ns_first}, "
             f"defer_boundary_batch_size={self.fsdp_overlap_defer_boundary_batch_size}.",
         )
 
@@ -1431,22 +1434,47 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         pending = gather_state["pending"]
 
         deferred_distributed_updates = []
-        local_updates = []
+        local_only_updates = []
+        distributed_updates = []
         for idx, update in enumerate(all_updates):
             update_mode = update[2]
             if update_mode == "gather":
                 continue
-            if update_mode == "distributed" and self.fsdp_defer_distributed_ns_under_gather:
-                deferred_distributed_updates.append((idx, update))
+            if update_mode == "distributed":
+                if self.fsdp_defer_distributed_ns_under_gather:
+                    deferred_distributed_updates.append((idx, update))
+                else:
+                    distributed_updates.append((idx, update))
                 continue
-            local_updates.append((idx, update))
-        local_updates.sort(
-            key=lambda item: self._local_update_work_estimate(item[1][0], item[1][1]), reverse=True
-        )
-        with torch.autograd.profiler.record_function(
-            "Muon-FSDP phase 3a local NS/update under gather"
-        ):
-            self._apply_precomputed_muon_updates([update for _, update in local_updates])
+            local_only_updates.append((idx, update))
+
+        def sort_by_work(updates: list) -> None:
+            updates.sort(
+                key=lambda item: self._local_update_work_estimate(item[1][0], item[1][1]),
+                reverse=True,
+            )
+
+        sort_by_work(local_only_updates)
+        sort_by_work(distributed_updates)
+        if self.fsdp_overlap_local_ns_first:
+            with torch.autograd.profiler.record_function(
+                "Muon-FSDP phase 3a local-only NS/update under gather"
+            ):
+                self._apply_precomputed_muon_updates([update for _, update in local_only_updates])
+            if distributed_updates:
+                with torch.autograd.profiler.record_function(
+                    "Muon-FSDP phase 3a distributed NS/update after local under gather"
+                ):
+                    self._apply_precomputed_muon_updates(
+                        [update for _, update in distributed_updates]
+                    )
+        else:
+            local_updates = local_only_updates + distributed_updates
+            sort_by_work(local_updates)
+            with torch.autograd.profiler.record_function(
+                "Muon-FSDP phase 3a local NS/update under gather"
+            ):
+                self._apply_precomputed_muon_updates([update for _, update in local_updates])
 
         processed_item_indices: set[int] = set()
         deferred_boundary_updates_by_key: dict[Any, list] = {}
