@@ -302,6 +302,11 @@ class OptimizerConfig:
     shard layouts. Defaults to False.
     """
 
+    muon_fsdp_flat_batched_all_gather_nonempty_group: bool = False
+    """If True, eligible flat Muon+M-FSDP boundary gathers use a subgroup containing only ranks
+    with nonempty flat chunks. Defaults to False.
+    """
+
     muon_fsdp_reuse_gather_scratch: bool = False
     """If True, cache and reuse Muon+M-FSDP gather scratch buffers. Defaults to False."""
 
