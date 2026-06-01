@@ -432,6 +432,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_padded_all_gather_pad_factor: float = 1.25,
         fsdp_batch_max_gather_bytes: int = 1024 * 1024 * 1024,
         fsdp_padded_all_gather_zero_pad: bool = True,
+        fsdp_fused_async_gather_repack: bool = False,
         fsdp_fast_reconstruct: bool = True,
         fsdp_boundary_gather_dtype: str = "fp32",
         fsdp_distributed_ns: bool = False,
@@ -469,6 +470,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.fsdp_padded_all_gather_pad_factor = fsdp_padded_all_gather_pad_factor
         self.fsdp_batch_max_gather_bytes = fsdp_batch_max_gather_bytes
         self.fsdp_padded_all_gather_zero_pad = fsdp_padded_all_gather_zero_pad
+        self.fsdp_fused_async_gather_repack = fsdp_fused_async_gather_repack
         self.fsdp_fast_reconstruct = fsdp_fast_reconstruct
         supported_boundary_gather_dtypes = ("fp32", "bf16", "int8", "fp8_e4m3fn", "fp8_e5m2")
         if fsdp_boundary_gather_dtype not in supported_boundary_gather_dtypes:
@@ -776,6 +778,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"boundary_gather_dtype={self.fsdp_boundary_gather_dtype}, "
             f"wire_element_size={wire_element_size}, "
             f"flat={self.fsdp_flat_batched_all_gather}, "
+            f"fused_async_repack={self.fsdp_fused_async_gather_repack}, "
             f"overlap={self.fsdp_overlap_comm_compute}, "
             f"overlap_local_ns_first={self.fsdp_overlap_local_ns_first}, "
             f"overlap_boundary_ready_event={self.fsdp_overlap_boundary_ready_event}, "
@@ -4014,8 +4017,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         batch: dict[str, Any],
         stage_idx: int,
         stage: dict[str, Any],
+        *,
+        wait_for_previous: bool = True,
     ) -> dict[str, Any]:
-        self._wait_uneven_gather_stage(pending_stage)
+        if wait_for_previous:
+            self._wait_uneven_gather_stage(pending_stage)
         with torch.autograd.profiler.record_function("Muon-FSDP gather fused unpack/pack"):
             previous_stage_idx = pending_stage["stage_idx"]
             if stage_idx != previous_stage_idx + 1:
@@ -4358,9 +4364,27 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         comm_stream.wait_stream(torch.cuda.current_stream())
                     with torch.cuda.stream(comm_stream):
                         for stage_idx, stage in enumerate(plans[0]["stages"]):
-                            stage_state = self._prepare_uneven_gather_stage(
-                                current_buffers, plans, batch, stage_idx, stage
-                            )
+                            if (
+                                self.fsdp_fused_async_gather_repack
+                                and stage_idx > 0
+                                and pending_stages
+                            ):
+                                # The previous Work has already inserted a stream wait below,
+                                # so repacking can stay GPU-queued without a CPU-side wait.
+                                stage_state = (
+                                    self._prepare_uneven_gather_stage_from_previous_pending(
+                                        pending_stages[-1],
+                                        plans,
+                                        batch,
+                                        stage_idx,
+                                        stage,
+                                        wait_for_previous=False,
+                                    )
+                                )
+                            else:
+                                stage_state = self._prepare_uneven_gather_stage(
+                                    current_buffers, plans, batch, stage_idx, stage
+                                )
                             pending_stage = self._issue_uneven_gather_stage(
                                 stage_state, async_op=True, comm_stream=comm_stream
                             )
@@ -4380,7 +4404,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                                     "torch.distributed.Work.block_current_stream()."
                                 )
                             pending_stages.append(pending_stage)
-                            current_buffers = self._unpack_uneven_gather_stage(pending_stage)
+                            if not self.fsdp_fused_async_gather_repack:
+                                current_buffers = self._unpack_uneven_gather_stage(pending_stage)
 
                 return {
                     "items": items,

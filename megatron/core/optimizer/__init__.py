@@ -754,6 +754,9 @@ def _get_muon_fsdp_kwargs(config: OptimizerConfig) -> dict[str, Any]:
         "fsdp_padded_all_gather_zero_pad": getattr(
             config, "muon_fsdp_padded_all_gather_zero_pad", True
         ),
+        "fsdp_fused_async_gather_repack": getattr(
+            config, "muon_fsdp_fused_async_gather_repack", False
+        ),
         "fsdp_fast_reconstruct": getattr(config, "muon_fsdp_fast_reconstruct", True),
         "fsdp_boundary_gather_dtype": getattr(config, "muon_fsdp_boundary_gather_dtype", "fp32"),
         "fsdp_distributed_ns": getattr(config, "muon_fsdp_distributed_ns", False),
