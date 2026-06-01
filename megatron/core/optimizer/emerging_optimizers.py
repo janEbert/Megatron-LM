@@ -470,6 +470,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_batched_newton_schulz_max_numel: int = 16 * 1024 * 1024,
         fsdp_batched_newton_schulz_max_batch_bytes: int = 2 * 1024 * 1024 * 1024,
         fsdp_batched_distributed_newton_schulz_max_batch_bytes: int = 0,
+        fsdp_foreach_pre_ns: bool = False,
         fsdp_foreach_weight_update: bool = False,
         fsdp_foreach_gather_weight_update: bool = False,
         **kwargs: Any,
@@ -554,6 +555,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             fsdp_batched_distributed_newton_schulz_max_batch_bytes
             or fsdp_batched_newton_schulz_max_batch_bytes
         )
+        self.fsdp_foreach_pre_ns = fsdp_foreach_pre_ns
         self.fsdp_foreach_weight_update = fsdp_foreach_weight_update
         self.fsdp_foreach_gather_weight_update = fsdp_foreach_gather_weight_update
         self._boundary_gather_indices_cache: dict[tuple[int, ...], set[int]] = {}
@@ -1023,6 +1025,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"{self.fsdp_approx_local_boundary_flat_norm_all_reduce}, "
             "approx_local_boundary_async_norm_all_reduce="
             f"{self.fsdp_approx_local_boundary_async_norm_all_reduce}, "
+            f"foreach_pre_ns={self.fsdp_foreach_pre_ns}, "
             f"distributed_ns_small_col_dim={self.fsdp_distributed_ns_small_col_dim}, "
             f"distributed_ns_min_numel={self.fsdp_distributed_ns_min_numel}, "
             f"partial_distributed_candidates={partial_distributed_candidate_count} "
@@ -1392,6 +1395,31 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
         def append_pre_ns_updates(*, local_only: bool | None) -> list[int]:
             appended_indices = []
+            foreach_candidates: list[dict[str, Any]] = []
+
+            def flush_foreach_candidates() -> None:
+                nonlocal foreach_candidates
+                if not foreach_candidates:
+                    return
+                if not self._append_foreach_local_pre_ns_updates(
+                    foreach_candidates, all_updates, appended_indices
+                ):
+                    for candidate in foreach_candidates:
+                        pre_ns_grad = self._compute_local_pre_ns_grad(
+                            candidate["param"], candidate["group"], candidate["lr"]
+                        )
+                        appended_indices.append(len(all_updates))
+                        all_updates.append(
+                            (
+                                candidate["param"],
+                                pre_ns_grad,
+                                candidate["update_mode"],
+                                candidate["lr"],
+                                candidate["group_kwargs"],
+                            )
+                        )
+                foreach_candidates = []
+
             for group, gather_param_indices, lr, group_kwargs in group_contexts:
                 for param_idx, p in enumerate(group["params"]):
                     update_mode = (
@@ -1418,9 +1446,25 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         ):
                             continue
 
-                    pre_ns_grad = self._compute_local_pre_ns_grad(p, group, lr)
-                    appended_indices.append(len(all_updates))
-                    all_updates.append((p, pre_ns_grad, update_mode, lr, group_kwargs))
+                    if self.fsdp_foreach_pre_ns:
+                        foreach_candidates.append(
+                            {
+                                "param": p,
+                                "grad": self._param_grad(p),
+                                "group": group,
+                                "group_kwargs": group_kwargs,
+                                "update_mode": update_mode,
+                                "lr": lr,
+                                "momentum": group["momentum"],
+                                "weight_decay": group["weight_decay"],
+                            }
+                        )
+                    else:
+                        flush_foreach_candidates()
+                        pre_ns_grad = self._compute_local_pre_ns_grad(p, group, lr)
+                        appended_indices.append(len(all_updates))
+                        all_updates.append((p, pre_ns_grad, update_mode, lr, group_kwargs))
+                flush_foreach_candidates()
             return appended_indices
 
         # Phase 1: Compute remaining momentum updates.  With local-first
@@ -1558,6 +1602,96 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         if self.nesterov:
             return local_grad.lerp(mom_local, group["momentum"])
         return mom_local
+
+    def _append_foreach_local_pre_ns_updates(
+        self, candidates: list[dict[str, Any]], all_updates: list, appended_indices: list[int]
+    ) -> bool:
+        """Append pre-NS updates after batched elementwise momentum work."""
+        if len(candidates) < 2:
+            return False
+        required_ops = ("_foreach_mul_", "_foreach_add_", "_foreach_mul")
+        if any(not hasattr(torch, op_name) for op_name in required_ops):
+            return False
+
+        weight_decay_method = getattr(self, "weight_decay_method", "l2")
+        weight_decay_values = {candidate["weight_decay"] for candidate in candidates}
+        if weight_decay_values != {0.0} and weight_decay_method != "decoupled":
+            return False
+
+        buckets: dict[
+            tuple[Any, ...],
+            list[tuple[int, dict[str, Any], torch.Tensor, torch.Tensor, torch.Tensor]],
+        ] = {}
+        for candidate_idx, candidate in enumerate(candidates):
+            p = candidate["param"]
+            grad = candidate["grad"]
+            if grad is None:
+                return False
+            p_local = p._local_tensor
+            mom_local = self.state[p]["momentum_buffer"]._local_tensor
+            local_grad = grad._local_tensor
+            if local_grad.dtype != mom_local.dtype:
+                local_grad = local_grad.to(dtype=mom_local.dtype)
+            key = (
+                p_local.device,
+                p_local.dtype,
+                mom_local.device,
+                mom_local.dtype,
+                local_grad.device,
+                local_grad.dtype,
+                candidate["lr"],
+                candidate["momentum"],
+                candidate["weight_decay"],
+            )
+            buckets.setdefault(key, []).append(
+                (candidate_idx, candidate, p_local, mom_local, local_grad)
+            )
+
+        pre_ns_results: list[torch.Tensor | None] = [None] * len(candidates)
+        for bucket_items in buckets.values():
+            _, first_candidate, _, _, _ = bucket_items[0]
+            lr = first_candidate["lr"]
+            momentum = first_candidate["momentum"]
+            weight_decay = first_candidate["weight_decay"]
+            p_tensors = [item[2] for item in bucket_items]
+            mom_tensors = [item[3] for item in bucket_items]
+            grad_tensors = [item[4] for item in bucket_items]
+            with torch.autograd.profiler.record_function(
+                f"Muon-FSDP foreach pre-NS count={len(bucket_items)}"
+            ):
+                if weight_decay != 0.0:
+                    torch._foreach_add_(p_tensors, p_tensors, alpha=-(weight_decay * lr))
+                if hasattr(torch, "_foreach_lerp_"):
+                    torch._foreach_lerp_(mom_tensors, grad_tensors, 1 - momentum)
+                else:
+                    torch._foreach_mul_(mom_tensors, momentum)
+                    torch._foreach_add_(mom_tensors, grad_tensors, alpha=1 - momentum)
+                if self.nesterov:
+                    if hasattr(torch, "_foreach_lerp"):
+                        pre_ns_tensors = torch._foreach_lerp(grad_tensors, mom_tensors, momentum)
+                    else:
+                        pre_ns_tensors = torch._foreach_mul(grad_tensors, 1 - momentum)
+                        torch._foreach_add_(pre_ns_tensors, mom_tensors, alpha=momentum)
+                else:
+                    pre_ns_tensors = mom_tensors
+
+            for (candidate_idx, _, _, _, _), pre_ns_grad in zip(bucket_items, pre_ns_tensors):
+                pre_ns_results[candidate_idx] = pre_ns_grad
+
+        for candidate, pre_ns_grad in zip(candidates, pre_ns_results):
+            if pre_ns_grad is None:
+                return False
+            appended_indices.append(len(all_updates))
+            all_updates.append(
+                (
+                    candidate["param"],
+                    pre_ns_grad,
+                    candidate["update_mode"],
+                    candidate["lr"],
+                    candidate["group_kwargs"],
+                )
+            )
+        return True
 
     def _prepare_boundary_gather_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         if self.fsdp_boundary_gather_dtype == "bf16" and tensor.dtype != torch.bfloat16:
