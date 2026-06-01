@@ -427,8 +427,8 @@ class OptimizerConfig:
 
     muon_fsdp_approx_local_boundary_max_local_numel: int = 0
     """If greater than zero with approximate local boundary updates, only approximate
-    boundary tensors whose local shard has at most this many elements; larger local
-    boundary shards keep the exact gather path.
+    boundary tensors whose rank-consistent maximum original local shard has at most
+    this many elements; larger local boundary shards keep the exact gather path.
     """
 
     muon_fsdp_overlap_local_ns_first: bool = False
