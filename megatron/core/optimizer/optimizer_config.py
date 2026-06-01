@@ -408,6 +408,12 @@ class OptimizerConfig:
     drain. This preserves exact Muon math and only changes scheduling.
     """
 
+    muon_fsdp_approx_local_boundary_update: bool = False
+    """If True, approximate Muon+M-FSDP boundary updates by orthogonalizing local
+    boundary shards without gathering the full tensor. This changes optimizer math
+    and defaults to False.
+    """
+
     muon_fsdp_overlap_local_ns_first: bool = False
     """If True, prioritize fully local Newton-Schulz/update work before distributed
     Newton-Schulz work while overlapped boundary all-gathers are pending.
