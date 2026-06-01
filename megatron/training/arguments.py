@@ -2582,6 +2582,14 @@ def _add_regularization_args(parser):
                        'all-reduce when the DTensor plan exposes a flat shard group. '
                        'This preserves the norm-ratio formula up to FP32 reduction '
                        'order. Defaults to false.')
+    group.add_argument('--muon-fsdp-approx-local-boundary-async-norm-all-reduce',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='When approximate local-boundary global-norm scaling is '
+                       'enabled, launch norm all-reduces on the Muon FSDP '
+                       'communication stream and wait only when the norm ratios are '
+                       'needed. This preserves the scaling formula and only changes '
+                       'stream scheduling. Defaults to false.')
     group.add_argument('--muon-fsdp-overlap-local-ns-first',
                        action=argparse.BooleanOptionalAction,
                        default=False,

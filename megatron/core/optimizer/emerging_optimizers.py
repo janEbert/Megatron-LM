@@ -463,6 +463,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_approx_local_boundary_global_norm_scale: bool = False,
         fsdp_approx_local_boundary_foreach_norm: bool = False,
         fsdp_approx_local_boundary_flat_norm_all_reduce: bool = False,
+        fsdp_approx_local_boundary_async_norm_all_reduce: bool = False,
         fsdp_overlap_local_ns_first: bool = False,
         fsdp_overlap_comm_compute: bool = False,
         fsdp_overlap_boundary_ready_event: bool = False,
@@ -536,6 +537,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.fsdp_approx_local_boundary_foreach_norm = fsdp_approx_local_boundary_foreach_norm
         self.fsdp_approx_local_boundary_flat_norm_all_reduce = (
             fsdp_approx_local_boundary_flat_norm_all_reduce
+        )
+        self.fsdp_approx_local_boundary_async_norm_all_reduce = (
+            fsdp_approx_local_boundary_async_norm_all_reduce
         )
         self.fsdp_overlap_local_ns_first = fsdp_overlap_local_ns_first
         self.fsdp_overlap_comm_compute = fsdp_overlap_comm_compute
@@ -1022,6 +1026,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"{self.fsdp_approx_local_boundary_foreach_norm}, "
             "approx_local_boundary_flat_norm_all_reduce="
             f"{self.fsdp_approx_local_boundary_flat_norm_all_reduce}, "
+            "approx_local_boundary_async_norm_all_reduce="
+            f"{self.fsdp_approx_local_boundary_async_norm_all_reduce}, "
             f"distributed_ns_small_col_dim={self.fsdp_distributed_ns_small_col_dim}, "
             f"distributed_ns_min_numel={self.fsdp_distributed_ns_min_numel}, "
             f"partial_distributed_candidates={partial_distributed_candidate_count} "
@@ -2183,12 +2189,12 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         global_norm = global_sq.sqrt().clamp_min(1e-7)
         return (local_norm / global_norm).to(device=pre_ns_grad.device, dtype=torch.float32)
 
-    def _precompute_approx_local_boundary_global_norm_scales(
+    def _begin_precompute_approx_local_boundary_global_norm_scales(
         self, updates: list
-    ) -> dict[int, torch.Tensor]:
-        """Batch local/global norm ratios for approximate local-boundary updates."""
+    ) -> dict[str, Any] | None:
+        """Start batched local/global norm-ratio computation for boundary updates."""
         if not self.fsdp_approx_local_boundary_global_norm_scale:
-            return {}
+            return None
 
         entries: list[tuple[torch.Tensor, torch.Tensor, dict[str, Any] | None]] = []
         for p, pre_ns_grad, update_mode, _, _ in updates:
@@ -2200,7 +2206,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             entries.append((p, pre_ns_grad, plan))
 
         if not entries:
-            return {}
+            return None
 
         def compute_local_sqs() -> torch.Tensor:
             tensors = [pre_ns_grad for _, pre_ns_grad, _ in entries]
@@ -2220,7 +2226,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             )
 
         with torch.autograd.profiler.record_function(
-            f"Muon-FSDP approx boundary global norm scale count={len(entries)}"
+            f"Muon-FSDP approx boundary global norm begin count={len(entries)}"
         ):
             with torch.autograd.profiler.record_function(
                 f"Muon-FSDP approx boundary global norm local-sq count={len(entries)}"
@@ -2230,10 +2236,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             max_stage_count = max(
                 (len(plan["stages"]) for _, _, plan in entries if plan is not None), default=0
             )
-            with torch.autograd.profiler.record_function(
-                "Muon-FSDP approx boundary global norm all-reduce "
-                f"stages={max_stage_count} count={len(entries)}"
-            ):
+
+            def launch_all_reduces() -> None:
                 remaining_entry_indices = set(range(len(entries)))
                 if self.fsdp_approx_local_boundary_flat_norm_all_reduce:
                     flat_groups: dict[int, tuple[torch.distributed.ProcessGroup, list[int]]] = {}
@@ -2287,13 +2291,78 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         )
                         global_sqs[entry_indices] = group_sqs
 
+            done_event = None
             with torch.autograd.profiler.record_function(
-                f"Muon-FSDP approx boundary global norm ratio count={len(entries)}"
+                "Muon-FSDP approx boundary global norm all-reduce "
+                f"stages={max_stage_count} count={len(entries)}"
             ):
-                local_norms = local_sqs.sqrt()
-                global_norms = global_sqs.sqrt().clamp_min(1e-7)
-                norm_scales = (local_norms / global_norms).to(dtype=torch.float32)
-            return {id(p): norm_scales[entry_idx] for entry_idx, (p, _, _) in enumerate(entries)}
+                if (
+                    self.fsdp_approx_local_boundary_async_norm_all_reduce
+                    and local_sqs.device.type == "cuda"
+                    and torch.cuda.is_available()
+                ):
+                    device = local_sqs.device
+                    with torch.cuda.device(device):
+                        ready_event = torch.cuda.Event()
+                        current_stream = torch.cuda.current_stream(device)
+                        current_stream.record_event(ready_event)
+                        comm_stream = self._get_fsdp_comm_stream(device)
+                        global_sqs.record_stream(comm_stream)
+                        with torch.cuda.stream(comm_stream):
+                            comm_stream.wait_event(ready_event)
+                            launch_all_reduces()
+                            done_event = torch.cuda.Event()
+                            done_event.record(comm_stream)
+                else:
+                    launch_all_reduces()
+
+            return {
+                "entries": entries,
+                "local_sqs": local_sqs,
+                "global_sqs": global_sqs,
+                "done_event": done_event,
+                "device": local_sqs.device,
+                "finished": None,
+            }
+
+    def _finish_precompute_approx_local_boundary_global_norm_scales(
+        self, work: dict[str, Any] | None
+    ) -> dict[int, torch.Tensor]:
+        """Finish batched boundary norm ratios after any async reductions complete."""
+        if work is None:
+            return {}
+
+        finished = work.get("finished")
+        if finished is not None:
+            return finished
+
+        entries = work["entries"]
+        local_sqs = work["local_sqs"]
+        global_sqs = work["global_sqs"]
+        done_event = work.get("done_event")
+        if done_event is not None:
+            with torch.autograd.profiler.record_function(
+                f"Muon-FSDP approx boundary global norm wait count={len(entries)}"
+            ):
+                with torch.cuda.device(work["device"]):
+                    torch.cuda.current_stream(work["device"]).wait_event(done_event)
+
+        with torch.autograd.profiler.record_function(
+            f"Muon-FSDP approx boundary global norm ratio count={len(entries)}"
+        ):
+            local_norms = local_sqs.sqrt()
+            global_norms = global_sqs.sqrt().clamp_min(1e-7)
+            norm_scales = (local_norms / global_norms).to(dtype=torch.float32)
+        result = {id(p): norm_scales[entry_idx] for entry_idx, (p, _, _) in enumerate(entries)}
+        work["finished"] = result
+        return result
+
+    def _precompute_approx_local_boundary_global_norm_scales(
+        self, updates: list
+    ) -> dict[int, torch.Tensor]:
+        """Batch local/global norm ratios for approximate local-boundary updates."""
+        work = self._begin_precompute_approx_local_boundary_global_norm_scales(updates)
+        return self._finish_precompute_approx_local_boundary_global_norm_scales(work)
 
     def _apply_orthogonal_muon_update(
         self, p: torch.Tensor, orth_update: torch.Tensor, update_mode: str, lr: float
@@ -2425,7 +2494,18 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 maybe_progress()
             return
 
-        precomputed_norm_scales = self._precompute_approx_local_boundary_global_norm_scales(updates)
+        norm_scale_work = self._begin_precompute_approx_local_boundary_global_norm_scales(updates)
+        precomputed_norm_scales: dict[int, torch.Tensor] | None = None
+
+        def get_precomputed_norm_scales() -> dict[int, torch.Tensor]:
+            nonlocal precomputed_norm_scales
+            if precomputed_norm_scales is None:
+                precomputed_norm_scales = (
+                    self._finish_precompute_approx_local_boundary_global_norm_scales(
+                        norm_scale_work
+                    )
+                )
+            return precomputed_norm_scales
 
         batch_map: dict[
             tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype, torch.device], list
@@ -2531,7 +2611,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         if self.fsdp_prioritize_distributed_ns:
             apply_distributed_batches()
 
-        for key, candidate_updates in batch_map.items():
+        batch_items = list(batch_map.items())
+        if norm_scale_work is not None and self.fsdp_approx_local_boundary_async_norm_all_reduce:
+            batch_items.sort(key=lambda item: item[0][0] == "local_boundary")
+
+        for key, candidate_updates in batch_items:
             for chunk in self._iter_batched_ns_chunks(candidate_updates):
                 if len(chunk) < 2:
                     for update in chunk:
@@ -2557,7 +2641,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         ):
                             norm_scales = []
                             for update in chunk:
-                                norm_scale = precomputed_norm_scales.get(id(update[0]))
+                                norm_scale = get_precomputed_norm_scales().get(id(update[0]))
                                 if norm_scale is None:
                                     raise AssertionError(
                                         "Missing precomputed local-boundary norm scale "
@@ -2630,15 +2714,21 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         )
 
         for p, pre_ns_grad, update_mode, lr, group_kwargs in fallback_updates:
+            precomputed_norm_scale = None
+            if update_mode == "local_boundary":
+                precomputed_norm_scale = get_precomputed_norm_scales().get(id(p))
             self._apply_precomputed_muon_update(
                 p,
                 pre_ns_grad,
                 update_mode,
                 lr,
                 group_kwargs,
-                precomputed_norm_scale=precomputed_norm_scales.get(id(p)),
+                precomputed_norm_scale=precomputed_norm_scale,
             )
             maybe_progress()
+
+        if precomputed_norm_scales is None:
+            get_precomputed_norm_scales()
 
     def _apply_precomputed_muon_update(
         self,

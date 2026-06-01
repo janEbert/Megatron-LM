@@ -468,6 +468,12 @@ class OptimizerConfig:
     group. This preserves the norm-ratio formula up to FP32 reduction order.
     """
 
+    muon_fsdp_approx_local_boundary_async_norm_all_reduce: bool = False
+    """If True, launch approximate local-boundary global-norm all-reduces on the
+    Muon FSDP communication stream and wait only when the norm ratios are needed.
+    This preserves the norm-ratio formula and only changes stream scheduling.
+    """
+
     muon_fsdp_overlap_local_ns_first: bool = False
     """If True, prioritize fully local Newton-Schulz/update work before distributed
     Newton-Schulz work while overlapped boundary all-gathers are pending.
