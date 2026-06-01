@@ -2064,6 +2064,7 @@ class TestFSDPFactoryIntegration:
         assert not config.muon_fsdp_approx_local_boundary_full_shape_scale
         assert not config.muon_fsdp_approx_local_boundary_exclude_qkv
         assert config.muon_fsdp_approx_local_boundary_max_local_numel == 0
+        assert not config.muon_fsdp_approx_local_boundary_global_norm_scale
         assert not config.muon_fsdp_overlap_comm_compute
 
     @pytest.mark.parametrize("strategy", ["no_shard", "optim", "optim_grads", "optim_grads_params"])
@@ -2122,6 +2123,7 @@ class TestFSDPFactoryIntegration:
             muon_fsdp_approx_local_boundary_full_shape_scale=True,
             muon_fsdp_approx_local_boundary_exclude_qkv=True,
             muon_fsdp_approx_local_boundary_max_local_numel=1234,
+            muon_fsdp_approx_local_boundary_global_norm_scale=True,
             muon_fsdp_overlap_comm_compute=True,
         )
         pg_collection = ProcessGroupCollection.use_mpu_process_groups()
@@ -2176,4 +2178,5 @@ class TestFSDPFactoryIntegration:
             assert base_opt.fsdp_approx_local_boundary_full_shape_scale
             assert base_opt.fsdp_approx_local_boundary_exclude_qkv
             assert base_opt.fsdp_approx_local_boundary_max_local_numel == 1234
+            assert base_opt.fsdp_approx_local_boundary_global_norm_scale
             assert base_opt.fsdp_overlap_comm_compute

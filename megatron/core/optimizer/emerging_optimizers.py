@@ -452,6 +452,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_approx_local_boundary_full_shape_scale: bool = False,
         fsdp_approx_local_boundary_exclude_qkv: bool = False,
         fsdp_approx_local_boundary_max_local_numel: int = 0,
+        fsdp_approx_local_boundary_global_norm_scale: bool = False,
         fsdp_overlap_local_ns_first: bool = False,
         fsdp_overlap_comm_compute: bool = False,
         fsdp_overlap_boundary_ready_event: bool = False,
@@ -515,6 +516,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.fsdp_approx_local_boundary_exclude_qkv = fsdp_approx_local_boundary_exclude_qkv
         self.fsdp_approx_local_boundary_max_local_numel = max(
             0, fsdp_approx_local_boundary_max_local_numel
+        )
+        self.fsdp_approx_local_boundary_global_norm_scale = (
+            fsdp_approx_local_boundary_global_norm_scale
         )
         self.fsdp_overlap_local_ns_first = fsdp_overlap_local_ns_first
         self.fsdp_overlap_comm_compute = fsdp_overlap_comm_compute
@@ -991,6 +995,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"{self.fsdp_approx_local_boundary_exclude_qkv}, "
             "approx_local_boundary_max_local_numel="
             f"{self.fsdp_approx_local_boundary_max_local_numel}, "
+            "approx_local_boundary_global_norm_scale="
+            f"{self.fsdp_approx_local_boundary_global_norm_scale}, "
             f"distributed_ns_small_col_dim={self.fsdp_distributed_ns_small_col_dim}, "
             f"distributed_ns_min_numel={self.fsdp_distributed_ns_min_numel}, "
             f"partial_distributed_candidates={partial_distributed_candidate_count} "
@@ -1371,7 +1377,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         # update for all TP ranks, as tensor parallelism uses
                         # even sharding, so empty implies that FSDP did not
                         # assign any fraction of the parameter to this DP rank.
-                        continue
+                        if not (
+                            update_mode == "local_boundary"
+                            and self.fsdp_approx_local_boundary_global_norm_scale
+                        ):
+                            continue
 
                     pre_ns_grad = self._compute_local_pre_ns_grad(p, group, lr)
                     appended_indices.append(len(all_updates))
@@ -1687,6 +1697,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return None
         if pre_ns_grad.ndim != 2 or pre_ns_grad.numel() == 0:
             return None
+        if update_mode == "local_boundary" and self.fsdp_approx_local_boundary_global_norm_scale:
+            return None
         if pre_ns_grad.numel() > self.fsdp_batched_newton_schulz_max_numel:
             return None
         if self._is_split_qkv_param(p) or self._tp_partition_dim_for_param(p) is not None:
@@ -1745,6 +1757,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         if not self.fsdp_batched_newton_schulz:
             return None
         if update_mode in ("distributed", "partial_distributed") or pre_ns_grad is None:
+            return None
+        if update_mode == "local_boundary" and self.fsdp_approx_local_boundary_global_norm_scale:
             return None
         if not self._is_split_qkv_param(p) or self.qkv_split_shapes is None:
             return None
@@ -2053,6 +2067,12 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
     def _approx_local_boundary_orthogonalize(
         self, p: torch.Tensor, pre_ns_grad: torch.Tensor
     ) -> torch.Tensor:
+        norm_scale = None
+        if self.fsdp_approx_local_boundary_global_norm_scale:
+            norm_scale = self._get_approx_local_boundary_global_norm_scale(p, pre_ns_grad)
+            if pre_ns_grad.numel() == 0:
+                return torch.empty_like(pre_ns_grad)
+
         orth_update = newton_schulz_tp(
             pre_ns_grad,
             steps=self.num_ns_steps,
@@ -2066,7 +2086,30 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             int(p.shape[-2]), int(p.shape[-1]), mode=self.scale_mode
         )
         orth_update.mul_(scale_factor * self.extra_scale_factor)
+        if norm_scale is not None:
+            orth_update.mul_(norm_scale)
         return orth_update
+
+    def _get_approx_local_boundary_global_norm_scale(
+        self, p: torch.Tensor, pre_ns_grad: torch.Tensor
+    ) -> torch.Tensor:
+        """Return local/global Frobenius norm ratio for a boundary shard.
+
+        This is an approximation knob: local Newton-Schulz remains block-local,
+        but the final update magnitude is shrunk according to the full parameter
+        pre-NS norm so local shards do not use an overly large local-only scale.
+        """
+        local_sq = pre_ns_grad.float().square().sum()
+        global_sq = local_sq.clone()
+        plan = self._get_uneven_gather_plan(p)
+        if plan is not None:
+            for stage in plan["stages"]:
+                torch.distributed.all_reduce(
+                    global_sq, op=torch.distributed.ReduceOp.SUM, group=stage["shard_group"]
+                )
+        local_norm = local_sq.sqrt()
+        global_norm = global_sq.sqrt().clamp_min(1e-7)
+        return (local_norm / global_norm).to(device=pre_ns_grad.device, dtype=torch.float32)
 
     def _apply_orthogonal_muon_update(
         self, p: torch.Tensor, orth_update: torch.Tensor, update_mode: str, lr: float

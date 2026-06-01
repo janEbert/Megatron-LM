@@ -2516,6 +2516,13 @@ def _add_regularization_args(parser):
                        'approximate boundary tensors whose rank-consistent maximum '
                        'original local shard has at most this many elements. A value <= 0 '
                        'disables the cap. Defaults to 0.')
+    group.add_argument('--muon-fsdp-approx-local-boundary-global-norm-scale',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='When approximate local boundary updates are enabled, scale '
+                       'each local boundary update by the local/global pre-Newton-Schulz '
+                       'Frobenius norm ratio. This keeps block-local math but avoids '
+                       'local-only norm amplification. Defaults to false.')
     group.add_argument('--muon-fsdp-overlap-local-ns-first',
                        action=argparse.BooleanOptionalAction,
                        default=False,
