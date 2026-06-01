@@ -3040,6 +3040,13 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self._uneven_gather_plan_cache[cache_key] = plan
         return plan
 
+    def _get_global_max_original_local_numel(self, dtensor_ref) -> int:
+        """Return a rank-consistent max original local shard size for an uneven DTensor."""
+        plan = self._get_uneven_gather_plan(dtensor_ref)
+        if plan is None:
+            return int(dtensor_ref._local_tensor.numel())
+        return max((int(chunk_info["numel"]) for chunk_info in plan["chunk_infos"]), default=0)
+
     def _get_partial_uneven_gather_plan(
         self, dtensor_ref, gather_mesh_dims: tuple[int, ...]
     ) -> dict[str, Any] | None:
@@ -3497,7 +3504,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 return "gather"
             if (
                 self.fsdp_approx_local_boundary_max_local_numel > 0
-                and param._local_tensor.numel() > self.fsdp_approx_local_boundary_max_local_numel
+                and self._get_global_max_original_local_numel(param)
+                > self.fsdp_approx_local_boundary_max_local_numel
             ):
                 return "gather"
             return "local_boundary"
