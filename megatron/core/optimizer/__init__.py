@@ -822,6 +822,9 @@ def _get_muon_fsdp_kwargs(config: OptimizerConfig) -> dict[str, Any]:
         "fsdp_approx_local_boundary_async_norm_all_reduce": getattr(
             config, "muon_fsdp_approx_local_boundary_async_norm_all_reduce", False
         ),
+        "fsdp_batched_qkv_local_boundary": getattr(
+            config, "muon_fsdp_batched_qkv_local_boundary", False
+        ),
         "fsdp_overlap_local_ns_first": getattr(config, "muon_fsdp_overlap_local_ns_first", False),
         "fsdp_overlap_comm_compute": getattr(config, "muon_fsdp_overlap_comm_compute", False),
         "fsdp_overlap_boundary_ready_event": getattr(

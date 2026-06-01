@@ -2568,6 +2568,14 @@ def _add_regularization_args(parser):
                        'communication stream and wait only when the norm ratios are '
                        'needed. This preserves the scaling formula and only changes '
                        'stream scheduling. Defaults to false.')
+    group.add_argument('--muon-fsdp-batched-qkv-local-boundary',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='Allow split-QKV tensors on the approximate local-boundary '
+                       'path to use batched split-QKV Newton-Schulz when their local '
+                       'shard layout is eligible. This is opt-in because boundary QKV '
+                       'shards may not be aligned to full QKV split groups. Defaults '
+                       'to false.')
     group.add_argument('--muon-fsdp-overlap-local-ns-first',
                        action=argparse.BooleanOptionalAction,
                        default=False,
