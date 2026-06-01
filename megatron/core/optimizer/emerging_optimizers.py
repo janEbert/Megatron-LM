@@ -1009,58 +1009,88 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return gathered_tensor.to(dtype=reference_tensor.dtype)
         return gathered_tensor
 
-    def _compute_int8_boundary_gather_scale(
-        self, local_buffer: torch.Tensor, gather_groups: list[torch.distributed.ProcessGroup]
+    def _compute_int8_boundary_gather_scales(
+        self,
+        current_buffers: list[torch.Tensor],
+        gather_groups: list[torch.distributed.ProcessGroup],
     ) -> torch.Tensor:
-        if local_buffer.numel() == 0:
-            absmax = torch.zeros((), dtype=torch.float32, device=local_buffer.device)
-        else:
-            with torch.autograd.profiler.record_function("Muon-FSDP int8 gather absmax"):
-                absmax = local_buffer.detach().abs().amax().to(dtype=torch.float32)
+        device = current_buffers[0].device
+        with torch.autograd.profiler.record_function("Muon-FSDP int8 gather absmax"):
+            absmaxes = torch.empty(len(current_buffers), dtype=torch.float32, device=device)
+            for idx, buffer in enumerate(current_buffers):
+                if buffer.numel() == 0:
+                    absmaxes[idx] = 0.0
+                else:
+                    absmaxes[idx] = buffer.detach().abs().amax().to(dtype=torch.float32)
         with torch.autograd.profiler.record_function("Muon-FSDP int8 gather scale all-reduce"):
             for group in gather_groups:
-                torch.distributed.all_reduce(absmax, op=torch.distributed.ReduceOp.MAX, group=group)
-        return (absmax / 127.0).clamp_min(torch.finfo(torch.float32).tiny)
+                torch.distributed.all_reduce(
+                    absmaxes, op=torch.distributed.ReduceOp.MAX, group=group
+                )
+        return (absmaxes / 127.0).clamp_min(torch.finfo(torch.float32).tiny)
 
     def _maybe_quantize_boundary_gather_buffer(
         self,
         local_buffer: torch.Tensor,
         batch: dict[str, Any],
-        gather_groups: list[torch.distributed.ProcessGroup],
         *,
         stage_idx: int,
+        item_numels: list[int],
     ) -> torch.Tensor:
         if self.fsdp_boundary_gather_dtype != "int8":
             return local_buffer
         if stage_idx == 0:
-            scale = self._compute_int8_boundary_gather_scale(local_buffer, gather_groups)
-            batch["_int8_gather_scale"] = scale
+            scales = batch.get("_int8_gather_scales")
+            if scales is None:
+                raise AssertionError("Muon+M-FSDP int8 boundary gather has no item scales.")
             with torch.autograd.profiler.record_function("Muon-FSDP int8 gather quantize"):
-                return (
-                    torch.clamp(
-                        torch.round(local_buffer.to(dtype=torch.float32) / scale), -127, 127
-                    )
-                    .to(dtype=torch.int8)
-                    .contiguous()
+                quantized = torch.empty(
+                    local_buffer.numel(), dtype=torch.int8, device=local_buffer.device
                 )
+                offset = 0
+                for item_idx, item_numel in enumerate(item_numels):
+                    if item_numel == 0:
+                        continue
+                    item_slice = slice(offset, offset + item_numel)
+                    quantized[item_slice].copy_(
+                        torch.clamp(
+                            torch.round(
+                                local_buffer[item_slice].to(dtype=torch.float32) / scales[item_idx]
+                            ),
+                            -127,
+                            127,
+                        ).to(dtype=torch.int8)
+                    )
+                    offset += item_numel
+                if offset != local_buffer.numel():
+                    raise AssertionError(
+                        "Muon+M-FSDP int8 boundary gather quantized an unexpected size: "
+                        f"quantized={offset}, expected={local_buffer.numel()}."
+                    )
+                return quantized
 
         if local_buffer.dtype != torch.int8:
             raise AssertionError(
                 "Muon+M-FSDP int8 boundary gather expected later stages to repack int8 buffers, "
                 f"got {local_buffer.dtype} at stage {stage_idx}."
             )
-        if "_int8_gather_scale" not in batch:
+        if "_int8_gather_scales" not in batch:
             raise AssertionError("Muon+M-FSDP int8 boundary gather lost its batch scale.")
         return local_buffer
 
     def _maybe_dequantize_boundary_gather_result(
-        self, full_tensor: torch.Tensor, reference_tensor: torch.Tensor, batch: dict[str, Any]
+        self,
+        full_tensor: torch.Tensor,
+        reference_tensor: torch.Tensor,
+        batch: dict[str, Any],
+        batch_item_idx: int,
     ) -> torch.Tensor:
         if self.fsdp_boundary_gather_dtype != "int8":
             return full_tensor
-        scale = batch.get("_int8_gather_scale")
-        if scale is None:
+        scales = batch.get("_int8_gather_scales")
+        if scales is None:
             raise AssertionError("Muon+M-FSDP int8 boundary gather result has no scale.")
+        scale = scales[batch_item_idx]
         with torch.autograd.profiler.record_function("Muon-FSDP int8 gather dequantize"):
             return (full_tensor.to(dtype=torch.float32) * scale).to(dtype=reference_tensor.dtype)
 
@@ -2833,8 +2863,12 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                     f"packed {local_offset}, expected {expected_local_numel}."
                 )
 
+        if self.fsdp_boundary_gather_dtype == "int8":
+            batch["_int8_gather_scales"] = self._compute_int8_boundary_gather_scales(
+                current_buffers, [flat_group]
+            )
         local_buffer = self._maybe_quantize_boundary_gather_buffer(
-            local_buffer, batch, [flat_group], stage_idx=0
+            local_buffer, batch, stage_idx=0, item_numels=expected_item_numels
         )
 
         rank_offsets: list[list[int]] = []
@@ -2890,7 +2924,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 dtensor_ref, batch["flat_plans"][batch_item_idx], rank_buffers, rank_buffer_offsets
             )
             results[item_idx] = self._maybe_dequantize_boundary_gather_result(
-                full_tensor, local_tensor, batch
+                full_tensor, local_tensor, batch, batch_item_idx
             )
         return batch["item_indices"]
 
@@ -2986,11 +3020,13 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         f"{expected_local_numel}."
                     )
 
+            if self.fsdp_boundary_gather_dtype == "int8" and stage_idx == 0:
+                batch["_int8_gather_scales"] = self._compute_int8_boundary_gather_scales(
+                    current_buffers,
+                    [plan_stage["shard_group"] for plan_stage in plans[0]["stages"]],
+                )
             local_buffer = self._maybe_quantize_boundary_gather_buffer(
-                local_buffer,
-                batch,
-                [plan_stage["shard_group"] for plan_stage in plans[0]["stages"]],
-                stage_idx=stage_idx,
+                local_buffer, batch, stage_idx=stage_idx, item_numels=expected_item_numels
             )
 
             rank_offsets: list[list[int]] = []
@@ -3091,10 +3127,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 )
 
             local_buffer = self._maybe_quantize_boundary_gather_buffer(
-                local_buffer,
-                batch,
-                [plan_stage["shard_group"] for plan_stage in plans[0]["stages"]],
-                stage_idx=stage_idx,
+                local_buffer, batch, stage_idx=stage_idx, item_numels=expected_item_numels
             )
 
             rank_offsets: list[list[int]] = []
@@ -3284,7 +3317,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                     dtensor_ref, plan, current_buffers[batch_item_idx]
                 )
                 results[item_idx] = self._maybe_dequantize_boundary_gather_result(
-                    full_tensor, local_tensor, batch
+                    full_tensor, local_tensor, batch, batch_item_idx
                 )
             return item_indices
 
@@ -3314,7 +3347,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 dtensor_ref, plans[batch_item_idx], stage_idx, rank_buffers, rank_buffer_offsets
             )
             results[item_idx] = self._maybe_dequantize_boundary_gather_result(
-                full_tensor, local_tensor, batch
+                full_tensor, local_tensor, batch, batch_item_idx
             )
         return item_indices
 
