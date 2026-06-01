@@ -2095,6 +2095,16 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             orth_update.mul_(norm_scale)
         return orth_update
 
+    def _uses_approx_local_boundary_full_shape_scale(
+        self, p: torch.Tensor, update_mode: str
+    ) -> bool:
+        return (
+            update_mode == "local_boundary"
+            and self.fsdp_approx_local_boundary_full_shape_scale
+            and not self._is_split_qkv_param(p)
+            and self._tp_partition_dim_for_param(p) is None
+        )
+
     def _get_approx_local_boundary_global_norm_scale(
         self, p: torch.Tensor, pre_ns_grad: torch.Tensor
     ) -> torch.Tensor:
@@ -2115,6 +2125,60 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         local_norm = local_sq.sqrt()
         global_norm = global_sq.sqrt().clamp_min(1e-7)
         return (local_norm / global_norm).to(device=pre_ns_grad.device, dtype=torch.float32)
+
+    def _precompute_approx_local_boundary_global_norm_scales(
+        self, updates: list
+    ) -> dict[int, torch.Tensor]:
+        """Batch local/global norm ratios for approximate local-boundary updates."""
+        if not self.fsdp_approx_local_boundary_global_norm_scale:
+            return {}
+
+        entries: list[tuple[torch.Tensor, torch.Tensor, dict[str, Any]]] = []
+        for p, pre_ns_grad, update_mode, _, _ in updates:
+            if update_mode != "local_boundary" or pre_ns_grad is None:
+                continue
+            if self._uses_approx_local_boundary_full_shape_scale(p, update_mode):
+                continue
+            plan = self._get_uneven_gather_plan(p)
+            if plan is None:
+                continue
+            entries.append((p, pre_ns_grad, plan))
+
+        if not entries:
+            return {}
+
+        with torch.autograd.profiler.record_function(
+            f"Muon-FSDP approx boundary global norm scale count={len(entries)}"
+        ):
+            local_sqs = torch.stack(
+                [pre_ns_grad.float().square().sum() for _, pre_ns_grad, _ in entries]
+            )
+            global_sqs = local_sqs.clone()
+            max_stage_count = max(len(plan["stages"]) for _, _, plan in entries)
+            for stage_idx in range(max_stage_count):
+                stage_groups: dict[int, tuple[torch.distributed.ProcessGroup, list[int]]] = {}
+                for entry_idx, (_, _, plan) in enumerate(entries):
+                    if stage_idx >= len(plan["stages"]):
+                        continue
+                    shard_group = plan["stages"][stage_idx]["shard_group"]
+                    group_id = id(shard_group)
+                    if group_id not in stage_groups:
+                        stage_groups[group_id] = (shard_group, [])
+                    stage_groups[group_id][1].append(entry_idx)
+
+                for shard_group, entry_indices in stage_groups.values():
+                    if get_pg_size(shard_group) <= 1:
+                        continue
+                    group_sqs = global_sqs[entry_indices].contiguous()
+                    torch.distributed.all_reduce(
+                        group_sqs, op=torch.distributed.ReduceOp.SUM, group=shard_group
+                    )
+                    global_sqs[entry_indices] = group_sqs
+
+            local_norms = local_sqs.sqrt()
+            global_norms = global_sqs.sqrt().clamp_min(1e-7)
+            norm_scales = (local_norms / global_norms).to(dtype=torch.float32)
+            return {id(p): norm_scales[entry_idx] for entry_idx, (p, _, _) in enumerate(entries)}
 
     def _apply_orthogonal_muon_update(
         self, p: torch.Tensor, orth_update: torch.Tensor, update_mode: str, lr: float
@@ -2421,8 +2485,19 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             fallback_shape_counts=fallback_shape_counts,
         )
 
+        precomputed_norm_scales = self._precompute_approx_local_boundary_global_norm_scales(
+            fallback_updates
+        )
+
         for p, pre_ns_grad, update_mode, lr, group_kwargs in fallback_updates:
-            self._apply_precomputed_muon_update(p, pre_ns_grad, update_mode, lr, group_kwargs)
+            self._apply_precomputed_muon_update(
+                p,
+                pre_ns_grad,
+                update_mode,
+                lr,
+                group_kwargs,
+                precomputed_norm_scale=precomputed_norm_scales.get(id(p)),
+            )
             maybe_progress()
 
     def _apply_precomputed_muon_update(
@@ -2432,6 +2507,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         update_mode: str,
         lr: float,
         group_kwargs: dict[str, Any],
+        precomputed_norm_scale: torch.Tensor | None = None,
     ) -> None:
         if update_mode == "gather":
             if pre_ns_grad is None:
@@ -2457,11 +2533,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             self._apply_orthogonal_muon_update(p, orth_update, update_mode, lr)
             return
 
-        full_shape_boundary_scale = (
-            update_mode == "local_boundary"
-            and self.fsdp_approx_local_boundary_full_shape_scale
-            and not self._is_split_qkv_param(p)
-            and self._tp_partition_dim_for_param(p) is None
+        full_shape_boundary_scale = self._uses_approx_local_boundary_full_shape_scale(
+            p, update_mode
         )
         norm_scale = None
         if (
@@ -2469,7 +2542,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             and self.fsdp_approx_local_boundary_global_norm_scale
             and not full_shape_boundary_scale
         ):
-            norm_scale = self._get_approx_local_boundary_global_norm_scale(p, pre_ns_grad)
+            norm_scale = precomputed_norm_scale
+            if norm_scale is None:
+                norm_scale = self._get_approx_local_boundary_global_norm_scale(p, pre_ns_grad)
             if pre_ns_grad.numel() == 0:
                 return
 
