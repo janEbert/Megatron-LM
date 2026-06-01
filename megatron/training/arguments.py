@@ -2516,6 +2516,12 @@ def _add_regularization_args(parser):
                        help='Approximate maximum Gram bytes per batched distributed '
                        'Muon+M-FSDP Newton-Schulz chunk. A value of 0 reuses '
                        '--muon-fsdp-batched-newton-schulz-max-batch-bytes. Default: 0.')
+    group.add_argument('--muon-fsdp-foreach-weight-update',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='Apply eligible batched Muon+M-FSDP local/distributed weight '
+                       'updates with torch foreach kernels. Preserves optimizer math and '
+                       'reduces per-parameter update launches. Defaults to false.')
     group.add_argument('--lion-beta1', type=float, default=0.95,
                        help='First beta coefficient for Lion optimizer '
                        '(used in sign update). Default: 0.95.')
