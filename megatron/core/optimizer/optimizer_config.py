@@ -414,6 +414,23 @@ class OptimizerConfig:
     and defaults to False.
     """
 
+    muon_fsdp_approx_local_boundary_full_shape_scale: bool = False
+    """If True with approximate local boundary updates, scale each local boundary
+    shard using the full parameter shape rather than the local shard shape. This
+    remains approximate but is closer to exact Muon update scaling.
+    """
+
+    muon_fsdp_approx_local_boundary_exclude_qkv: bool = False
+    """If True with approximate local boundary updates, keep split-QKV boundary
+    tensors on the exact gather path.
+    """
+
+    muon_fsdp_approx_local_boundary_max_local_numel: int = 0
+    """If greater than zero with approximate local boundary updates, only approximate
+    boundary tensors whose local shard has at most this many elements; larger local
+    boundary shards keep the exact gather path.
+    """
+
     muon_fsdp_overlap_local_ns_first: bool = False
     """If True, prioritize fully local Newton-Schulz/update work before distributed
     Newton-Schulz work while overlapped boundary all-gathers are pending.
