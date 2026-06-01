@@ -444,6 +444,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_partial_distributed_ns: bool = False,
         fsdp_defer_distributed_ns_under_gather: bool = False,
         fsdp_defer_partial_distributed_ns_under_gather: bool = False,
+        fsdp_async_partial_distributed_gather: bool = False,
         fsdp_overlap_local_ns_first: bool = False,
         fsdp_overlap_comm_compute: bool = False,
         fsdp_overlap_boundary_ready_event: bool = False,
@@ -494,6 +495,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.fsdp_defer_partial_distributed_ns_under_gather = (
             fsdp_defer_partial_distributed_ns_under_gather
         )
+        self.fsdp_async_partial_distributed_gather = fsdp_async_partial_distributed_gather
         self.fsdp_overlap_local_ns_first = fsdp_overlap_local_ns_first
         self.fsdp_overlap_comm_compute = fsdp_overlap_comm_compute
         self.fsdp_overlap_boundary_ready_event = fsdp_overlap_boundary_ready_event
@@ -1745,6 +1747,18 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             self._restore_boundary_gather_tensor(gathered, reference)
             for gathered, reference in zip(gathered_partials, reference_tensors)
         ]
+        self._apply_batched_partial_distributed_muon_updates_from_partials(
+            chunk, partial_pre_ns_updates
+        )
+
+    def _apply_batched_partial_distributed_muon_updates_from_partials(
+        self, chunk: list, partial_pre_ns_updates: list[torch.Tensor]
+    ) -> None:
+        p0 = chunk[0][0]
+        plan = self._get_fsdp_partial_distributed_ns_plan(p0)
+        if plan is None:
+            raise AssertionError("Partial distributed NS received an ineligible parameter.")
+
         partial_shapes = [tuple(partial.shape) for partial in partial_pre_ns_updates]
 
         if any(shape != partial_shapes[0] for shape in partial_shapes):
@@ -1770,6 +1784,81 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         for orth_update, (p, _, update_mode, lr, _) in zip(orth_updates.unbind(0), chunk):
             local_update = self._local_shard_from_partial_update_like(p, orth_update)
             self._apply_orthogonal_muon_update(p, local_update, update_mode, lr)
+
+    def _start_async_partial_distributed_gathers(
+        self, indexed_updates: list[tuple[int, tuple]]
+    ) -> tuple[list[dict[str, Any]], list[tuple[int, tuple]]]:
+        partial_distributed_batch_map: dict[
+            tuple[str, tuple[int, ...], torch.dtype, torch.device, int, int], list
+        ] = {}
+        fallback_updates: list[tuple[int, tuple]] = []
+
+        for idx, update in indexed_updates:
+            p, pre_ns_grad, update_mode, _, _ = update
+            partial_key = self._fsdp_batched_partial_distributed_ns_key(p, pre_ns_grad, update_mode)
+            if partial_key is None:
+                fallback_updates.append((idx, update))
+                continue
+            partial_distributed_batch_map.setdefault(partial_key, []).append((idx, update))
+
+        pending_chunks: list[dict[str, Any]] = []
+        for _, candidate_updates in partial_distributed_batch_map.items():
+            update_chunk_candidates = [update for _, update in candidate_updates]
+            chunk_start = 0
+            for chunk in self._iter_batched_partial_distributed_ns_chunks(update_chunk_candidates):
+                indexed_chunk = candidate_updates[chunk_start : chunk_start + len(chunk)]
+                chunk_start += len(chunk)
+                if len(chunk) < 2:
+                    fallback_updates.extend(indexed_chunk)
+                    continue
+
+                partial_plans = []
+                gather_items = []
+                reference_tensors = []
+                for p, pre_ns_grad, _, _, _ in chunk:
+                    item_plan = self._get_fsdp_partial_distributed_ns_plan(p)
+                    if item_plan is None:
+                        raise AssertionError(
+                            "Async partial distributed NS chunk contains an ineligible "
+                            "parameter."
+                        )
+                    partial_plans.append(item_plan["gather_plan"])
+                    gather_items.append((p, self._prepare_boundary_gather_tensor(pre_ns_grad)))
+                    reference_tensors.append(pre_ns_grad)
+
+                pending_gather = self._start_gather_partial_uneven_local_tensors_like_async(
+                    gather_items, partial_plans
+                )
+                pending_chunks.append(
+                    {
+                        "chunk": chunk,
+                        "reference_tensors": reference_tensors,
+                        "pending_gather": pending_gather,
+                    }
+                )
+
+        return pending_chunks, fallback_updates
+
+    def _finish_async_partial_distributed_gathers(
+        self, pending_chunks: list[dict[str, Any]]
+    ) -> None:
+        for pending_chunk in pending_chunks:
+            chunk = pending_chunk["chunk"]
+            with torch.autograd.profiler.record_function(
+                f"Muon-FSDP async partial distributed finish/update count={len(chunk)}"
+            ):
+                gathered_partials = self._finish_gather_partial_uneven_local_tensors_like_async(
+                    pending_chunk["pending_gather"]
+                )
+                partial_pre_ns_updates = [
+                    self._restore_boundary_gather_tensor(gathered, reference)
+                    for gathered, reference in zip(
+                        gathered_partials, pending_chunk["reference_tensors"]
+                    )
+                ]
+                self._apply_batched_partial_distributed_muon_updates_from_partials(
+                    chunk, partial_pre_ns_updates
+                )
 
     def _maybe_log_fsdp_batched_ns_summary(
         self,
@@ -2254,6 +2343,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         applied_update_indices = applied_update_indices or set()
 
         deferred_distributed_updates = []
+        deferred_partial_updates = []
         local_only_updates = []
         distributed_updates = []
         for idx, update in enumerate(all_updates):
@@ -2268,7 +2358,13 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                     and self.fsdp_defer_partial_distributed_ns_under_gather
                 )
                 if defer_update:
-                    deferred_distributed_updates.append((idx, update))
+                    if (
+                        update_mode == "partial_distributed"
+                        and self.fsdp_async_partial_distributed_gather
+                    ):
+                        deferred_partial_updates.append((idx, update))
+                    else:
+                        deferred_distributed_updates.append((idx, update))
                 else:
                     distributed_updates.append((idx, update))
                 continue
@@ -2283,6 +2379,16 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         progressed_item_indices: list[int] = []
 
         next_scratch_slot = self.fsdp_overlap_boundary_prefetch_batches
+
+        async_partial_pending_chunks: list[dict[str, Any]] = []
+        if deferred_partial_updates:
+            with torch.autograd.profiler.record_function(
+                "Muon-FSDP phase 2p start async partial distributed gather"
+            ):
+                async_partial_pending_chunks, fallback_partial_updates = (
+                    self._start_async_partial_distributed_gathers(deferred_partial_updates)
+                )
+            deferred_distributed_updates.extend(fallback_partial_updates)
 
         def start_next_pending(slot: int) -> bool:
             next_batch = next(batch_iter, None)
@@ -2450,6 +2556,12 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 self._apply_precomputed_muon_updates(
                     [update for _, update in deferred_distributed_updates]
                 )
+
+        if async_partial_pending_chunks:
+            with torch.autograd.profiler.record_function(
+                "Muon-FSDP phase 3d async partial distributed NS/update"
+            ):
+                self._finish_async_partial_distributed_gathers(async_partial_pending_chunks)
 
     def _local_update_work_estimate(self, p: torch.Tensor, pre_ns_grad: torch.Tensor | None) -> int:
         if pre_ns_grad is not None:
@@ -4529,6 +4641,95 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
         raise AssertionError("Partial uneven DTensor gather did not reach its final stage.")
 
+    def _validate_batched_partial_gather_plans(self, plans: list[dict[str, Any]]) -> int:
+        if not plans:
+            return 0
+        stage_count = len(plans[0]["stages"])
+        for plan in plans[1:]:
+            if len(plan["stages"]) != stage_count:
+                raise AssertionError("Batched partial gather expected equal stage counts.")
+            for stage_idx in range(stage_count):
+                if (
+                    plan["stages"][stage_idx]["shard_group"]
+                    is not plans[0]["stages"][stage_idx]["shard_group"]
+                ):
+                    raise AssertionError("Batched partial gather expected matching shard groups.")
+        return stage_count
+
+    def _start_gather_partial_uneven_local_tensors_like_async(
+        self, items: list[tuple[torch.Tensor, torch.Tensor]], plans: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        if len(items) != len(plans):
+            raise AssertionError(
+                "Async partial uneven DTensor batch gather item/plan length mismatch: "
+                f"items={len(items)}, plans={len(plans)}."
+            )
+        if not items:
+            return {"immediate": []}
+
+        stage_count = self._validate_batched_partial_gather_plans(plans)
+        if stage_count == 0:
+            return {"immediate": [local_tensor for _, local_tensor in items]}
+
+        local_tensor = items[0][1]
+        batch = {
+            "dtype": local_tensor.dtype,
+            "device": local_tensor.device,
+            "element_size": local_tensor.element_size(),
+            "item_indices": list(range(len(items))),
+            "plans": plans,
+        }
+        current_buffers = [
+            self._flatten_tensor_for_uneven_gather(item_local_tensor)
+            for _, item_local_tensor in items
+        ]
+        with torch.autograd.profiler.record_function(
+            f"Muon-FSDP async batched partial gather start count={len(items)}"
+        ):
+            stage_state = self._prepare_uneven_gather_stage(
+                current_buffers, plans, batch, 0, plans[0]["stages"][0]
+            )
+            pending_stage = self._start_uneven_gather_stage(stage_state, async_op=True)
+        return {"plans": plans, "batch": batch, "pending_stage": pending_stage}
+
+    def _finish_gather_partial_uneven_local_tensors_like_async(
+        self, pending: dict[str, Any]
+    ) -> list[torch.Tensor]:
+        if "immediate" in pending:
+            return pending["immediate"]
+
+        plans = pending["plans"]
+        batch = pending["batch"]
+        stage_count = self._validate_batched_partial_gather_plans(plans)
+        final_stage_idx = stage_count - 1
+
+        if final_stage_idx == 0:
+            self._wait_uneven_gather_stage(pending["pending_stage"])
+            return [
+                self._reconstruct_partial_tensor_from_final_stage_buffers(
+                    plan, pending["pending_stage"], batch_item_idx=batch_item_idx
+                )
+                for batch_item_idx, plan in enumerate(plans)
+            ]
+
+        current_buffers = self._finish_uneven_gather_stage(pending["pending_stage"])
+        for stage_idx in range(1, stage_count):
+            stage_state = self._prepare_uneven_gather_stage(
+                current_buffers, plans, batch, stage_idx, plans[0]["stages"][stage_idx]
+            )
+            pending_stage = self._start_uneven_gather_stage(stage_state, async_op=False)
+            if stage_idx == final_stage_idx:
+                self._wait_uneven_gather_stage(pending_stage)
+                return [
+                    self._reconstruct_partial_tensor_from_final_stage_buffers(
+                        plan, pending_stage, batch_item_idx=batch_item_idx
+                    )
+                    for batch_item_idx, plan in enumerate(plans)
+                ]
+            current_buffers = self._finish_uneven_gather_stage(pending_stage)
+
+        raise AssertionError("Async batched partial uneven DTensor gather missed final stage.")
+
     def _gather_partial_uneven_local_tensors_like(
         self, items: list[tuple[torch.Tensor, torch.Tensor]], plans: list[dict[str, Any]]
     ) -> list[torch.Tensor]:
@@ -4542,16 +4743,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         if not plans[0]["stages"]:
             return [local_tensor for _, local_tensor in items]
 
-        stage_count = len(plans[0]["stages"])
-        for plan in plans[1:]:
-            if len(plan["stages"]) != stage_count:
-                raise AssertionError("Batched partial gather expected equal stage counts.")
-            for stage_idx in range(stage_count):
-                if (
-                    plan["stages"][stage_idx]["shard_group"]
-                    is not plans[0]["stages"][stage_idx]["shard_group"]
-                ):
-                    raise AssertionError("Batched partial gather expected matching shard groups.")
+        stage_count = self._validate_batched_partial_gather_plans(plans)
 
         local_tensor = items[0][1]
         batch = {

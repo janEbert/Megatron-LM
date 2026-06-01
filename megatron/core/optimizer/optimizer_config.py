@@ -385,6 +385,12 @@ class OptimizerConfig:
     the gather, preserving the current local+distributed ordering.
     """
 
+    muon_fsdp_async_partial_distributed_gather: bool = False
+    """If True, start deferred partial-distributed gathers before local/distributed
+    under-gather work and finish only their Newton-Schulz/update after the boundary
+    drain. This preserves exact Muon math and only changes scheduling.
+    """
+
     muon_fsdp_overlap_local_ns_first: bool = False
     """If True, prioritize fully local Newton-Schulz/update work before distributed
     Newton-Schulz work while overlapped boundary all-gathers are pending.
