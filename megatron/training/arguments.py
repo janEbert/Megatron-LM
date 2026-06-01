@@ -2397,10 +2397,11 @@ def _add_regularization_args(parser):
                        help='View contiguous gathered Muon+M-FSDP buffers without an '
                        'additional reconstruction copy. Defaults to true.')
     group.add_argument('--muon-fsdp-boundary-gather-dtype', type=str, default='fp32',
-                       choices=['fp32', 'bf16'],
+                       choices=['fp32', 'bf16', 'int8'],
                        help='Communication dtype for Muon+M-FSDP boundary pre-NS '
                        'all-gathers. The gathered tensor is converted back before '
-                       'Newton-Schulz. Defaults to fp32.')
+                       'Newton-Schulz. int8 uses symmetric per-batch scaling. '
+                       'Defaults to fp32.')
     group.add_argument('--muon-fsdp-distributed-ns',
                        action=argparse.BooleanOptionalAction,
                        default=False,

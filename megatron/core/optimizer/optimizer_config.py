@@ -326,8 +326,8 @@ class OptimizerConfig:
 
     muon_fsdp_boundary_gather_dtype: str = 'fp32'
     """Communication dtype for Muon+M-FSDP boundary pre-NS all-gathers. Valid values are
-    'fp32' and 'bf16'. The gathered tensor is converted back to the local pre-NS dtype before
-    Newton-Schulz.
+    'fp32', 'bf16', and 'int8'. The gathered tensor is converted back to the local pre-NS dtype
+    before Newton-Schulz. The int8 mode uses a symmetric per-batch scale.
     """
 
     muon_fsdp_distributed_ns: bool = False
