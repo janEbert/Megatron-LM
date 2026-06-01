@@ -771,6 +771,7 @@ def _get_muon_fsdp_kwargs(config: OptimizerConfig) -> dict[str, Any]:
         "fsdp_distributed_ns_exclude_qkv": getattr(
             config, "muon_fsdp_distributed_ns_exclude_qkv", False
         ),
+        "fsdp_partial_distributed_ns": getattr(config, "muon_fsdp_partial_distributed_ns", False),
         "fsdp_defer_distributed_ns_under_gather": getattr(
             config, "muon_fsdp_defer_distributed_ns_under_gather", False
         ),
@@ -781,6 +782,12 @@ def _get_muon_fsdp_kwargs(config: OptimizerConfig) -> dict[str, Any]:
         ),
         "fsdp_overlap_boundary_prefetch_batches": getattr(
             config, "muon_fsdp_overlap_boundary_prefetch_batches", 1
+        ),
+        "fsdp_overlap_boundary_post_compute_prefetch_batches": getattr(
+            config, "muon_fsdp_overlap_boundary_post_compute_prefetch_batches", 0
+        ),
+        "fsdp_overlap_boundary_progress_during_local": getattr(
+            config, "muon_fsdp_overlap_boundary_progress_during_local", False
         ),
         "fsdp_overlap_defer_boundary_batch_size": getattr(
             config, "muon_fsdp_overlap_defer_boundary_batch_size", 1

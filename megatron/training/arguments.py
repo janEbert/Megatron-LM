@@ -2419,10 +2419,10 @@ def _add_regularization_args(parser):
                        help='View contiguous gathered Muon+M-FSDP buffers without an '
                        'additional reconstruction copy. Defaults to true.')
     group.add_argument('--muon-fsdp-boundary-gather-dtype', type=str, default='fp32',
-                       choices=['fp32', 'bf16', 'int8'],
+                       choices=['fp32', 'bf16', 'int8', 'fp8_e4m3fn', 'fp8_e5m2'],
                        help='Communication dtype for Muon+M-FSDP boundary pre-NS '
                        'all-gathers. The gathered tensor is converted back before '
-                       'Newton-Schulz. int8 uses symmetric per-batch scaling. '
+                       'Newton-Schulz. int8/fp8 use symmetric per-batch scaling. '
                        'Defaults to fp32.')
     group.add_argument('--muon-fsdp-distributed-ns',
                        action=argparse.BooleanOptionalAction,
@@ -2456,6 +2456,13 @@ def _add_regularization_args(parser):
                        help='Keep split-QKV tensors on the Muon+M-FSDP boundary all-gather '
                        'path even when they would otherwise be eligible for distributed '
                        'Newton-Schulz. Defaults to false.')
+    group.add_argument('--muon-fsdp-partial-distributed-ns',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='For exact mixed-shard Muon+M-FSDP tensors, gather only '
+                       'the non-Newton-Schulz matrix dimension and run distributed '
+                       'Newton-Schulz over the remaining shard dimension. Requires '
+                       '--muon-fsdp-distributed-ns. Defaults to false.')
     group.add_argument('--muon-fsdp-defer-distributed-ns-under-gather',
                        action=argparse.BooleanOptionalAction,
                        default=False,
@@ -2486,6 +2493,21 @@ def _add_regularization_args(parser):
                        help='Number of Muon+M-FSDP boundary gather batches to keep '
                        'queued during overlap. Values above 1 use double-buffered '
                        'gather scratch scopes. Default: 1.')
+    group.add_argument('--muon-fsdp-overlap-boundary-post-compute-prefetch-batches',
+                       type=int,
+                       default=0,
+                       help='Target Muon+M-FSDP boundary gather queue depth after '
+                       'local/distributed under-gather Newton-Schulz work finishes. '
+                       'This keeps the initial prefetch depth conservative while '
+                       'letting the boundary drain loop queue more communication. '
+                       'Default: 0.')
+    group.add_argument('--muon-fsdp-overlap-boundary-progress-during-local',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='Poll the oldest queued Muon+M-FSDP boundary gather between '
+                       'batched local Newton-Schulz chunks and launch the next gather when '
+                       'it has completed. Preserves optimizer math; only changes scheduling. '
+                       'Defaults to false.')
     group.add_argument('--muon-fsdp-overlap-defer-boundary-batch-size',
                        type=int,
                        default=1,
