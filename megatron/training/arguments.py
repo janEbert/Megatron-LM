@@ -2631,6 +2631,13 @@ def _add_regularization_args(parser):
                        help='Approximate maximum Gram bytes per batched distributed '
                        'Muon+M-FSDP Newton-Schulz chunk. A value of 0 reuses '
                        '--muon-fsdp-batched-newton-schulz-max-batch-bytes. Default: 0.')
+    group.add_argument('--muon-fsdp-foreach-pre-ns',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='Compute eligible Muon+M-FSDP local pre-Newton-Schulz '
+                       'momentum/Nesterov tensors with torch foreach elementwise '
+                       'kernels on the common decoupled weight-decay path. Defaults '
+                       'to false.')
     group.add_argument('--muon-fsdp-foreach-weight-update',
                        action=argparse.BooleanOptionalAction,
                        default=False,
