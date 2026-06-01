@@ -499,6 +499,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self._fsdp_comm_stream_cache: dict[torch.device, torch.cuda.Stream] = {}
         self._fsdp_gather_summary_logged = False
         self._fsdp_update_mode_summary_logged = False
+        self._fsdp_boundary_layout_summary_logged = False
         self._fsdp_batched_ns_summary_logged_modes: set[str] = set()
         super().__init__(params, **kwargs)
 
@@ -821,6 +822,131 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"distributed_ns_small_col_dim={self.fsdp_distributed_ns_small_col_dim}, "
             f"distributed_ns_min_numel={self.fsdp_distributed_ns_min_numel}, "
             f"top_update_shapes=[{top_update_shapes_text}]."
+        )
+        log_single_rank(logger, logging.INFO, message)
+        self._maybe_print_fsdp_diagnostic(message)
+
+    def _maybe_log_mfsdp_boundary_layout_summary(
+        self, params: list[torch.Tensor], boundary_indices: set[int]
+    ) -> None:
+        if self._fsdp_boundary_layout_summary_logged:
+            return
+        self._fsdp_boundary_layout_summary_logged = True
+
+        layout_count = 0
+        distributed_count = 0
+        selected_count = 0
+        flat_cross_count = 0
+        selected_flat_cross_count = 0
+        selected_local_partial_count = 0
+        selected_item_le_shard_count = 0
+        selected_item_gt_shard_count = 0
+        selected_aligned_start_count = 0
+        max_span_shards = 0
+        max_item_mib = 0.0
+        shape_counts: dict[
+            tuple[tuple[int, ...], tuple[int, ...], bool, bool, bool], dict[str, Any]
+        ] = {}
+
+        for idx, param in enumerate(params):
+            layout = self._get_mfsdp_param_layout(param, idx)
+            if layout is None:
+                continue
+            layout_count += 1
+
+            gbuf, item_index, bucket_index, shard_bucket_index = layout
+            if not getattr(gbuf, "is_data_distributed", True):
+                continue
+            distributed_count += 1
+
+            item_size = int(item_index.size)
+            if item_size <= 0:
+                continue
+            bucket_start = int(bucket_index.global_data_index)
+            bucket_size = int(bucket_index.size)
+            shard_size = int(shard_bucket_index.size)
+            if shard_size <= 0:
+                continue
+
+            item_start = int(item_index.global_data_index)
+            item_end = item_start + item_size
+            first_shard = (item_start - bucket_start) // shard_size
+            last_shard = (item_end - 1 - bucket_start) // shard_size
+            span_shards = int(last_shard - first_shard + 1)
+            crosses_boundary = first_shard != last_shard
+            selected = idx in boundary_indices
+            local_tensor = param._local_tensor
+            local_partial = local_tensor.numel() > 0 and tuple(param.shape) != tuple(
+                local_tensor.shape
+            )
+            item_le_shard = item_size <= shard_size
+            aligned_start = (item_start - bucket_start) % shard_size == 0
+
+            flat_cross_count += int(crosses_boundary)
+            selected_count += int(selected)
+            if selected:
+                selected_flat_cross_count += int(crosses_boundary)
+                selected_local_partial_count += int(local_partial)
+                selected_item_le_shard_count += int(item_le_shard)
+                selected_item_gt_shard_count += int(not item_le_shard)
+                selected_aligned_start_count += int(aligned_start)
+                max_span_shards = max(max_span_shards, span_shards)
+                max_item_mib = max(
+                    max_item_mib, item_size * local_tensor.element_size() / (1024**2)
+                )
+
+                key = (
+                    tuple(param.shape),
+                    tuple(local_tensor.shape),
+                    crosses_boundary,
+                    item_le_shard,
+                    local_partial,
+                )
+                stat = shape_counts.setdefault(
+                    key,
+                    {
+                        "count": 0,
+                        "max_span": 0,
+                        "min_item_mib": float("inf"),
+                        "max_item_mib": 0.0,
+                        "shard_mib": shard_size * local_tensor.element_size() / (1024**2),
+                    },
+                )
+                stat["count"] += 1
+                stat["max_span"] = max(stat["max_span"], span_shards)
+                item_mib = item_size * local_tensor.element_size() / (1024**2)
+                stat["min_item_mib"] = min(stat["min_item_mib"], item_mib)
+                stat["max_item_mib"] = max(stat["max_item_mib"], item_mib)
+
+        if layout_count == 0:
+            return
+
+        top_shapes = sorted(shape_counts.items(), key=lambda item: item[1]["count"], reverse=True)[
+            :8
+        ]
+        top_shapes_text = ", ".join(
+            (
+                f"full={full_shape} local={local_shape} crosses={crosses} "
+                f"item_le_shard={item_le_shard} local_partial={local_partial}: "
+                f"count={stat['count']} item_mib={stat['min_item_mib']:.1f}-"
+                f"{stat['max_item_mib']:.1f} shard_mib={stat['shard_mib']:.1f} "
+                f"max_span={stat['max_span']}"
+            )
+            for (full_shape, local_shape, crosses, item_le_shard, local_partial), stat in top_shapes
+        )
+
+        message = (
+            "Muon+M-FSDP boundary layout summary: "
+            f"mfsdp_params={layout_count}, distributed_params={distributed_count}, "
+            f"selected_boundary={selected_count}, flat_cross={flat_cross_count}, "
+            f"selected_flat_cross={selected_flat_cross_count}, "
+            f"selected_local_partial={selected_local_partial_count}, "
+            f"selected_item_le_shard={selected_item_le_shard_count}, "
+            f"selected_item_gt_shard={selected_item_gt_shard_count}, "
+            f"selected_aligned_start={selected_aligned_start_count}, "
+            f"max_selected_span_shards={max_span_shards}, "
+            f"max_selected_item_mib={max_item_mib:.1f}, "
+            f"top_selected_shapes=[{top_shapes_text}]."
         )
         log_single_rank(logger, logging.INFO, message)
         self._maybe_print_fsdp_diagnostic(message)
@@ -2000,6 +2126,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             result = self._collect_boundary_indices_across_shard_groups(
                 params, local_boundary_indices
             )
+            self._maybe_log_mfsdp_boundary_layout_summary(params, result)
             self._boundary_gather_indices_cache[cache_key] = result
             return result
 
