@@ -464,6 +464,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_approx_local_boundary_foreach_norm: bool = False,
         fsdp_approx_local_boundary_flat_norm_all_reduce: bool = False,
         fsdp_approx_local_boundary_async_norm_all_reduce: bool = False,
+        fsdp_batched_qkv_local_boundary: bool = False,
         fsdp_overlap_local_ns_first: bool = False,
         fsdp_overlap_comm_compute: bool = False,
         fsdp_overlap_boundary_ready_event: bool = False,
@@ -542,6 +543,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.fsdp_approx_local_boundary_async_norm_all_reduce = (
             fsdp_approx_local_boundary_async_norm_all_reduce
         )
+        self.fsdp_batched_qkv_local_boundary = fsdp_batched_qkv_local_boundary
         self.fsdp_overlap_local_ns_first = fsdp_overlap_local_ns_first
         self.fsdp_overlap_comm_compute = fsdp_overlap_comm_compute
         self.fsdp_overlap_boundary_ready_event = fsdp_overlap_boundary_ready_event
@@ -1030,6 +1032,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"{self.fsdp_approx_local_boundary_flat_norm_all_reduce}, "
             "approx_local_boundary_async_norm_all_reduce="
             f"{self.fsdp_approx_local_boundary_async_norm_all_reduce}, "
+            f"batched_qkv_local_boundary={self.fsdp_batched_qkv_local_boundary}, "
             f"foreach_pre_ns={self.fsdp_foreach_pre_ns}, "
             f"distributed_ns_small_col_dim={self.fsdp_distributed_ns_small_col_dim}, "
             f"distributed_ns_min_numel={self.fsdp_distributed_ns_min_numel}, "
@@ -1966,6 +1969,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             and self.fsdp_approx_local_boundary_global_norm_scale
             and self.fsdp_approx_local_boundary_full_shape_scale
         ):
+            return None
+        if update_mode == "local_boundary" and not self.fsdp_batched_qkv_local_boundary:
             return None
         if not self._is_split_qkv_param(p) or self.qkv_split_shapes is None:
             return None
