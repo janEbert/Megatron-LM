@@ -537,6 +537,13 @@ class OptimizerConfig:
     chunk. A value of 0 reuses muon_fsdp_batched_newton_schulz_max_batch_bytes.
     """
 
+    muon_fsdp_defer_local_pre_ns_to_batched_ns: bool = False
+    """If True, for eligible fully local Muon+M-FSDP tensors, delay
+    momentum/Nesterov pre-Newton-Schulz materialization until the batched
+    Newton-Schulz chunk and build the batched NS input directly. This preserves
+    per-tensor optimizer math and only changes materialization/scheduling.
+    """
+
     muon_fsdp_foreach_pre_ns: bool = False
     """If True, compute Muon+M-FSDP local pre-Newton-Schulz momentum/Nesterov
     tensors with torch foreach elementwise kernels when the common decoupled
