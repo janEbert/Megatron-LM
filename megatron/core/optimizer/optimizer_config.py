@@ -319,6 +319,12 @@ class OptimizerConfig:
     muon_fsdp_padded_all_gather_zero_pad: bool = True
     """If True, zero-fill unused padding before Muon+M-FSDP padded gathers."""
 
+    muon_fsdp_fused_async_gather_repack: bool = False
+    """If True, overlapped multi-stage Muon+M-FSDP gathers repack directly from the previous
+    stage's rank buffers into the next stage's send buffer. This preserves collective order and
+    optimizer math while avoiding per-item intermediate unpack buffers.
+    """
+
     muon_fsdp_fast_reconstruct: bool = True
     """If True, view contiguous gathered Muon+M-FSDP buffers without an additional reconstruction
     copy.

@@ -2413,6 +2413,14 @@ def _add_regularization_args(parser):
                        default=True,
                        help='Zero-fill unused padding before Muon+M-FSDP padded gathers. '
                        'Defaults to true.')
+    group.add_argument('--muon-fsdp-fused-async-gather-repack',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='For overlapped multi-stage Muon+M-FSDP boundary gathers, '
+                       'repack directly from the previous gather stage into the next '
+                       'stage send buffer instead of materializing per-item intermediate '
+                       'buffers. Preserves collective order and optimizer math. '
+                       'Defaults to false.')
     group.add_argument('--muon-fsdp-fast-reconstruct',
                        action=argparse.BooleanOptionalAction,
                        default=True,
