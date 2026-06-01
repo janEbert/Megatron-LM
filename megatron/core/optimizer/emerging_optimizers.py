@@ -447,6 +447,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_defer_distributed_ns_under_gather: bool = False,
         fsdp_overlap_local_ns_first: bool = False,
         fsdp_overlap_comm_compute: bool = False,
+        fsdp_overlap_boundary_ready_event: bool = False,
         fsdp_overlap_boundary_prefetch_batches: int = 1,
         fsdp_overlap_defer_boundary_batch_size: int = 1,
         fsdp_batched_newton_schulz: bool = False,
@@ -485,6 +486,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.fsdp_defer_distributed_ns_under_gather = fsdp_defer_distributed_ns_under_gather
         self.fsdp_overlap_local_ns_first = fsdp_overlap_local_ns_first
         self.fsdp_overlap_comm_compute = fsdp_overlap_comm_compute
+        self.fsdp_overlap_boundary_ready_event = fsdp_overlap_boundary_ready_event
         self.fsdp_overlap_boundary_prefetch_batches = max(1, fsdp_overlap_boundary_prefetch_batches)
         self.fsdp_overlap_defer_boundary_batch_size = max(1, fsdp_overlap_defer_boundary_batch_size)
         self.fsdp_batched_newton_schulz = fsdp_batched_newton_schulz
@@ -747,6 +749,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"flat={self.fsdp_flat_batched_all_gather}, "
             f"overlap={self.fsdp_overlap_comm_compute}, "
             f"overlap_local_ns_first={self.fsdp_overlap_local_ns_first}, "
+            f"overlap_boundary_ready_event={self.fsdp_overlap_boundary_ready_event}, "
             f"prefetch_batches={self.fsdp_overlap_boundary_prefetch_batches}, "
             f"defer_boundary_batch_size={self.fsdp_overlap_defer_boundary_batch_size}, "
             f"top_boundary_shapes=[{top_boundary_shapes_text}].",
@@ -1602,6 +1605,25 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             )
         self._apply_orthogonal_muon_update(p, orth_update, update_mode, lr)
 
+    def _attach_boundary_ready_events(self, batches: list[dict[str, Any]]) -> None:
+        if not self.fsdp_overlap_boundary_ready_event:
+            return
+        if not torch.cuda.is_available():
+            return
+
+        ready_events: dict[torch.device, torch.cuda.Event] = {}
+        for batch in batches:
+            device = batch["device"]
+            if device.type != "cuda":
+                continue
+            event = ready_events.get(device)
+            if event is None:
+                with torch.cuda.device(device):
+                    event = torch.cuda.Event()
+                    torch.cuda.current_stream(device).record_event(event)
+                ready_events[device] = event
+            batch["_boundary_ready_event"] = event
+
     def _start_overlap_boundary_gathers(
         self, all_updates: list, boundary_update_indices: list[int]
     ) -> dict[str, Any]:
@@ -1614,6 +1636,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         batches = self._build_full_uneven_local_tensor_gather_batches(
             boundary_items, gathered_boundary_updates, completed_item_indices
         )
+        self._attach_boundary_ready_events(batches)
 
         batch_iter = iter(batches)
         pending_queue: list[tuple[dict[str, Any], int]] = []
@@ -3271,7 +3294,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         if async_op and device.type == "cuda":
             with torch.cuda.device(device):
                 comm_stream = self._get_fsdp_comm_stream(device)
-                comm_stream.wait_stream(torch.cuda.current_stream())
+                ready_event = stage_state["batch"].get("_boundary_ready_event")
+                if ready_event is not None:
+                    comm_stream.wait_event(ready_event)
+                else:
+                    comm_stream.wait_stream(torch.cuda.current_stream())
                 with torch.cuda.stream(comm_stream):
                     return self._issue_uneven_gather_stage(
                         stage_state, async_op=True, comm_stream=comm_stream
@@ -3482,7 +3509,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 final_stage_idx = len(plans[0]["stages"]) - 1
                 with torch.cuda.device(batch["device"]):
                     comm_stream = self._get_fsdp_comm_stream(batch["device"])
-                    comm_stream.wait_stream(torch.cuda.current_stream())
+                    ready_event = batch.get("_boundary_ready_event")
+                    if ready_event is not None:
+                        comm_stream.wait_event(ready_event)
+                    else:
+                        comm_stream.wait_stream(torch.cuda.current_stream())
                     with torch.cuda.stream(comm_stream):
                         for stage_idx, stage in enumerate(plans[0]["stages"]):
                             stage_state = self._prepare_uneven_gather_stage(

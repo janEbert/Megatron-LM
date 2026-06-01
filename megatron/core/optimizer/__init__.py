@@ -776,6 +776,9 @@ def _get_muon_fsdp_kwargs(config: OptimizerConfig) -> dict[str, Any]:
         ),
         "fsdp_overlap_local_ns_first": getattr(config, "muon_fsdp_overlap_local_ns_first", False),
         "fsdp_overlap_comm_compute": getattr(config, "muon_fsdp_overlap_comm_compute", False),
+        "fsdp_overlap_boundary_ready_event": getattr(
+            config, "muon_fsdp_overlap_boundary_ready_event", False
+        ),
         "fsdp_overlap_boundary_prefetch_batches": getattr(
             config, "muon_fsdp_overlap_boundary_prefetch_batches", 1
         ),
