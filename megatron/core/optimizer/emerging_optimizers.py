@@ -2554,6 +2554,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         target_dtype = param_tensors[0].dtype
         if any(param_tensor.dtype != target_dtype for param_tensor in param_tensors):
             return False
+        if not has_gather_update and orth_updates.dtype != target_dtype:
+            with torch.autograd.profiler.record_function(
+                f"Muon-FSDP batched weight update cast count={len(chunk)}"
+            ):
+                orth_updates = orth_updates.to(dtype=target_dtype)
 
         update_tensors = []
         for batch_idx, (param_tensor, update) in enumerate(zip(param_tensors, chunk)):
