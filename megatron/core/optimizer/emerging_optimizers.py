@@ -23,6 +23,7 @@ from megatron.core.utils import (
     get_pg_size,
     log_single_rank,
 )
+from megatron.training.utils import print_rank_0
 
 from .optimizer_config import ParamKey, ParamPredicate
 
@@ -840,8 +841,12 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         all_updates, boundary_update_indices
                     )
 
-        # Phase 1: Compute remaining momentum updates (fully local).
-        with torch.autograd.profiler.record_function("Muon-FSDP phase 1b local pre-NS"):
+        from emerging_optimizers import utils
+
+        early_applied_update_indices: set[int] = set()
+
+        def append_pre_ns_updates(*, local_only: bool | None) -> list[int]:
+            appended_indices = []
             for group, gather_param_indices, lr, group_kwargs in group_contexts:
                 for param_idx, p in enumerate(group["params"]):
                     update_mode = (
@@ -850,6 +855,10 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         else "local"
                     )
                     if overlap_enabled and update_mode == "gather":
+                        continue
+                    if local_only is True and update_mode != "local":
+                        continue
+                    if local_only is False and update_mode == "local":
                         continue
                     if p._local_tensor.numel() == 0 and update_mode == "local":
                         # If this parameter is not split by Megatron-FSDP,
@@ -860,7 +869,35 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         continue
 
                     pre_ns_grad = self._compute_local_pre_ns_grad(p, group, lr)
+                    appended_indices.append(len(all_updates))
                     all_updates.append((p, pre_ns_grad, update_mode, lr, group_kwargs))
+            return appended_indices
+
+        # Phase 1: Compute remaining momentum updates.  With local-first
+        # overlap, run fully local NS/update immediately after launching the
+        # boundary gather so it can cover the first communication window.
+        if overlap_enabled and self.fsdp_overlap_local_ns_first:
+            with torch.autograd.profiler.record_function(
+                "Muon-FSDP phase 1b local-only pre-NS first"
+            ):
+                early_local_update_indices = append_pre_ns_updates(local_only=True)
+            if early_local_update_indices:
+                with utils.fp32_matmul_precision(self.fp32_matmul_prec):
+                    with torch.autograd.profiler.record_function(
+                        "Muon-FSDP phase 3a early local-only NS/update under gather"
+                    ):
+                        self._apply_precomputed_muon_updates(
+                            [all_updates[i] for i in early_local_update_indices]
+                        )
+                early_applied_update_indices.update(early_local_update_indices)
+
+            with torch.autograd.profiler.record_function(
+                "Muon-FSDP phase 1c nonlocal pre-NS after early local"
+            ):
+                append_pre_ns_updates(local_only=False)
+        else:
+            with torch.autograd.profiler.record_function("Muon-FSDP phase 1b local pre-NS"):
+                append_pre_ns_updates(local_only=None)
 
         self._maybe_log_fsdp_update_mode_summary(all_updates)
 
@@ -872,14 +909,14 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 if update_mode == "gather"
             ]
 
-        # Phase 3: NS orthogonalization and weight update (fully local).
-        from emerging_optimizers import utils
-
         with utils.fp32_matmul_precision(self.fp32_matmul_prec):
             with torch.autograd.profiler.record_function("Muon-FSDP phase 3 NS/update"):
                 if overlap_enabled and boundary_update_indices:
                     self._overlap_boundary_gather_and_update(
-                        all_updates, boundary_update_indices, early_gather_state
+                        all_updates,
+                        boundary_update_indices,
+                        early_gather_state,
+                        early_applied_update_indices,
                     )
                 else:
                     if boundary_update_indices:
@@ -1421,6 +1458,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         all_updates: list,
         boundary_update_indices: list[int],
         gather_state: dict[str, Any] | None = None,
+        applied_update_indices: set[int] | None = None,
     ) -> None:
         if gather_state is None:
             gather_state = self._start_overlap_boundary_gathers(
@@ -1432,11 +1470,14 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         completed_item_indices = gather_state["completed_item_indices"]
         batch_iter = gather_state["batch_iter"]
         pending = gather_state["pending"]
+        applied_update_indices = applied_update_indices or set()
 
         deferred_distributed_updates = []
         local_only_updates = []
         distributed_updates = []
         for idx, update in enumerate(all_updates):
+            if idx in applied_update_indices:
+                continue
             update_mode = update[2]
             if update_mode == "gather":
                 continue
