@@ -881,7 +881,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         # Phase 1: Compute remaining momentum updates.  With local-first
         # overlap, run fully local NS/update immediately after launching the
         # boundary gather so it can cover the first communication window.
-        if overlap_enabled and self.fsdp_overlap_local_ns_first:
+        if overlap_enabled and self.fsdp_overlap_local_ns_first and boundary_update_indices:
             with torch.autograd.profiler.record_function(
                 "Muon-FSDP phase 1b local-only pre-NS first"
             ):
