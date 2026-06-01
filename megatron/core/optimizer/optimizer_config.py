@@ -373,6 +373,12 @@ class OptimizerConfig:
     boundary all-gathers are pending.
     """
 
+    muon_fsdp_defer_partial_distributed_ns_under_gather: bool = False
+    """If True, defer only partial-distributed Newton-Schulz while boundary
+    all-gathers are pending. Ordinary distributed Newton-Schulz still runs under
+    the gather, preserving the current local+distributed ordering.
+    """
+
     muon_fsdp_overlap_local_ns_first: bool = False
     """If True, prioritize fully local Newton-Schulz/update work before distributed
     Newton-Schulz work while overlapped boundary all-gathers are pending.
