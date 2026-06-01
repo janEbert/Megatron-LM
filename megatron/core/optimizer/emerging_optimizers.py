@@ -449,6 +449,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_defer_distributed_ns_under_gather: bool = False,
         fsdp_defer_partial_distributed_ns_under_gather: bool = False,
         fsdp_async_partial_distributed_gather: bool = False,
+        fsdp_prioritize_distributed_ns: bool = False,
+        fsdp_approx_distributed_ns_update: bool = False,
         fsdp_approx_local_boundary_update: bool = False,
         fsdp_approx_local_boundary_full_shape_scale: bool = False,
         fsdp_approx_local_boundary_exclude_qkv: bool = False,
@@ -511,6 +513,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             fsdp_defer_partial_distributed_ns_under_gather
         )
         self.fsdp_async_partial_distributed_gather = fsdp_async_partial_distributed_gather
+        self.fsdp_prioritize_distributed_ns = fsdp_prioritize_distributed_ns
+        self.fsdp_approx_distributed_ns_update = fsdp_approx_distributed_ns_update
         self.fsdp_approx_local_boundary_update = fsdp_approx_local_boundary_update
         self.fsdp_approx_local_boundary_full_shape_scale = (
             fsdp_approx_local_boundary_full_shape_scale
@@ -992,6 +996,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"defer_distributed_ns_under_gather={self.fsdp_defer_distributed_ns_under_gather}, "
             "defer_partial_distributed_ns_under_gather="
             f"{self.fsdp_defer_partial_distributed_ns_under_gather}, "
+            f"prioritize_distributed_ns={self.fsdp_prioritize_distributed_ns}, "
+            f"approx_distributed_ns_update={self.fsdp_approx_distributed_ns_update}, "
             f"approx_local_boundary_update={self.fsdp_approx_local_boundary_update}, "
             "approx_local_boundary_full_shape_scale="
             f"{self.fsdp_approx_local_boundary_full_shape_scale}, "
@@ -2438,6 +2444,32 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         batched_chunks = 0
         batched_updates = 0
 
+        def apply_distributed_batches() -> None:
+            nonlocal batched_chunks, batched_updates
+            for key, candidate_updates in distributed_batch_map.items():
+                for chunk in self._iter_batched_distributed_ns_chunks(candidate_updates):
+                    if len(chunk) < 2:
+                        for update in chunk:
+                            record_fallback(update, "singleton_distributed_batch")
+                        fallback_updates.extend(chunk)
+                        continue
+                    batched_chunks += 1
+                    batched_updates += len(chunk)
+                    mode, full_shape, _, _, _ = key
+                    local_rows = [int(update[1].shape[0]) for update in chunk]
+                    min_local_rows = min(local_rows)
+                    max_local_rows = max(local_rows)
+                    with torch.autograd.profiler.record_function(
+                        "Muon-FSDP batched distributed NS/update "
+                        f"mode={mode} full_shape={full_shape} count={len(chunk)} "
+                        f"local_rows={min_local_rows}..{max_local_rows}"
+                    ):
+                        self._apply_batched_distributed_muon_updates(chunk)
+                    maybe_progress()
+
+        if self.fsdp_prioritize_distributed_ns:
+            apply_distributed_batches()
+
         for key, candidate_updates in batch_map.items():
             for chunk in self._iter_batched_ns_chunks(candidate_updates):
                 if len(chunk) < 2:
@@ -2484,26 +2516,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                             self._apply_orthogonal_muon_update(p, orth_update, update_mode, lr)
                 maybe_progress()
 
-        for key, candidate_updates in distributed_batch_map.items():
-            for chunk in self._iter_batched_distributed_ns_chunks(candidate_updates):
-                if len(chunk) < 2:
-                    for update in chunk:
-                        record_fallback(update, "singleton_distributed_batch")
-                    fallback_updates.extend(chunk)
-                    continue
-                batched_chunks += 1
-                batched_updates += len(chunk)
-                mode, full_shape, _, _, _ = key
-                local_rows = [int(update[1].shape[0]) for update in chunk]
-                min_local_rows = min(local_rows)
-                max_local_rows = max(local_rows)
-                with torch.autograd.profiler.record_function(
-                    "Muon-FSDP batched distributed NS/update "
-                    f"mode={mode} full_shape={full_shape} count={len(chunk)} "
-                    f"local_rows={min_local_rows}..{max_local_rows}"
-                ):
-                    self._apply_batched_distributed_muon_updates(chunk)
-                maybe_progress()
+        if not self.fsdp_prioritize_distributed_ns:
+            apply_distributed_batches()
 
         for key, candidate_updates in partial_distributed_batch_map.items():
             for chunk in self._iter_batched_partial_distributed_ns_chunks(candidate_updates):
@@ -3722,7 +3736,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         return components, component_segments
 
     def _fsdp_boundary_update_mode(self, param: torch.Tensor) -> str:
-        if self._get_fsdp_distributed_ns_group(param) is not None:
+        if self._get_fsdp_distributed_ns_group(param) is not None and not (
+            self.fsdp_approx_distributed_ns_update and self.fsdp_approx_local_boundary_update
+        ):
             return "distributed"
         if self._get_fsdp_partial_distributed_ns_plan(param) is not None:
             return "partial_distributed"

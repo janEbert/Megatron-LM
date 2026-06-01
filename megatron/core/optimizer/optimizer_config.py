@@ -415,6 +415,18 @@ class OptimizerConfig:
     drain. This preserves exact Muon math and only changes scheduling.
     """
 
+    muon_fsdp_prioritize_distributed_ns: bool = False
+    """If True, enqueue exact distributed Newton-Schulz batches before local Muon
+    batches. This preserves update math and only changes scheduling across
+    independent parameters.
+    """
+
+    muon_fsdp_approx_distributed_ns_update: bool = False
+    """If True with approximate local boundary updates, route otherwise eligible
+    distributed Newton-Schulz tensors to the local-boundary approximation path.
+    This changes optimizer math and is intended for throughput experiments.
+    """
+
     muon_fsdp_approx_local_boundary_update: bool = False
     """If True, approximate Muon+M-FSDP boundary updates by orthogonalizing local
     boundary shards without gathering the full tensor. This changes optimizer math
