@@ -474,6 +474,13 @@ class OptimizerConfig:
     This preserves the norm-ratio formula and only changes stream scheduling.
     """
 
+    muon_fsdp_batched_qkv_local_boundary: bool = False
+    """If True, allow split-QKV tensors on the approximate local-boundary path
+    to use the batched split-QKV Newton-Schulz path when their local shard layout
+    is eligible. This remains opt-in because local boundary QKV shards may not be
+    aligned to full QKV split groups.
+    """
+
     muon_fsdp_overlap_local_ns_first: bool = False
     """If True, prioritize fully local Newton-Schulz/update work before distributed
     Newton-Schulz work while overlapped boundary all-gathers are pending.
