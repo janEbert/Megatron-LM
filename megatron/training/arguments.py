@@ -2471,6 +2471,12 @@ def _add_regularization_args(parser):
                        help='Keep split-QKV tensors on the Muon+M-FSDP boundary all-gather '
                        'path even when they would otherwise be eligible for distributed '
                        'Newton-Schulz. Defaults to false.')
+    group.add_argument('--muon-fsdp-distributed-ns-nonempty-group',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='Use cached distributed-NS subgroups containing only ranks with '
+                       'nonempty FSDP shards. Empty ranks skip their exact zero Gram '
+                       'contribution instead of joining the all-reduce. Defaults to false.')
     group.add_argument('--muon-fsdp-partial-distributed-ns',
                        action=argparse.BooleanOptionalAction,
                        default=False,

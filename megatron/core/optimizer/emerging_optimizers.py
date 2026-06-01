@@ -447,6 +447,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_distributed_ns_single_all_reduce: bool = False,
         fsdp_distributed_ns_gram_refresh_interval: int = 1,
         fsdp_distributed_ns_exclude_qkv: bool = False,
+        fsdp_distributed_ns_nonempty_group: bool = False,
         fsdp_partial_distributed_ns: bool = False,
         fsdp_defer_distributed_ns_under_gather: bool = False,
         fsdp_defer_partial_distributed_ns_under_gather: bool = False,
@@ -497,6 +498,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             1, fsdp_distributed_ns_gram_refresh_interval
         )
         self.fsdp_distributed_ns_exclude_qkv = fsdp_distributed_ns_exclude_qkv
+        self.fsdp_distributed_ns_nonempty_group = fsdp_distributed_ns_nonempty_group
         self.fsdp_partial_distributed_ns = fsdp_partial_distributed_ns
         self.fsdp_defer_distributed_ns_under_gather = fsdp_defer_distributed_ns_under_gather
         self.fsdp_defer_partial_distributed_ns_under_gather = (
@@ -529,6 +531,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             tuple[int, tuple[int, ...]], dict[str, Any] | None
         ] = {}
         self._flat_uneven_gather_plan_cache: dict[tuple[int, int], dict[str, Any] | None] = {}
+        self._fsdp_nonempty_group_cache: dict[tuple[int, ...], Any] = {}
         self._fsdp_gather_scratch_cache: dict[tuple[Any, ...], Any] = {}
         self._fsdp_gather_scratch_scope: Any = None
         self._fsdp_comm_stream_cache: dict[torch.device, torch.cuda.Stream] = {}
@@ -935,6 +938,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             "distributed_ns_gram_refresh_interval="
             f"{self.fsdp_distributed_ns_gram_refresh_interval}, "
             f"distributed_ns_exclude_qkv={self.fsdp_distributed_ns_exclude_qkv}, "
+            f"distributed_ns_nonempty_group={self.fsdp_distributed_ns_nonempty_group}, "
             f"defer_distributed_ns_under_gather={self.fsdp_defer_distributed_ns_under_gather}, "
             "defer_partial_distributed_ns_under_gather="
             f"{self.fsdp_defer_partial_distributed_ns_under_gather}, "
@@ -1716,8 +1720,10 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
     def _apply_batched_distributed_muon_updates(self, chunk: list) -> None:
         p0 = chunk[0][0]
-        fsdp_group = self._get_fsdp_distributed_ns_group(p0)
-        if fsdp_group is None:
+        fsdp_group, participates = self._get_fsdp_distributed_ns_runtime_group(p0, chunk[0][1])
+        if not participates:
+            return
+        if fsdp_group is None and not self.fsdp_distributed_ns_nonempty_group:
             raise AssertionError("Batched distributed NS received an ineligible parameter.")
 
         row_counts = [int(update[1].shape[0]) for update in chunk]
@@ -1734,19 +1740,22 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                     stacked_pre_ns[batch_idx, :rows].copy_(pre_ns_grad)
             padded_local_rows = True
 
-        orth_updates = newton_schulz_tp(
-            stacked_pre_ns,
-            steps=self.num_ns_steps,
-            coefficient_type=self.coefficient_type,
-            tp_group=fsdp_group,
-            partition_dim=0,
-            tp_mode="distributed",
-            use_syrk=self.use_syrk,
-            distributed_gram_recurrence=self.fsdp_distributed_ns_single_all_reduce,
-            distributed_gram_refresh_interval=self.fsdp_distributed_ns_gram_refresh_interval,
-        )
-        scale_factor = get_muon_scale_factor(p0.shape[-2], p0.shape[-1], mode=self.scale_mode)
-        orth_updates.mul_(scale_factor * self.extra_scale_factor)
+        if fsdp_group is None:
+            orth_updates = self.scaled_orthogonalize_fn(stacked_pre_ns, None, None)
+        else:
+            orth_updates = newton_schulz_tp(
+                stacked_pre_ns,
+                steps=self.num_ns_steps,
+                coefficient_type=self.coefficient_type,
+                tp_group=fsdp_group,
+                partition_dim=0,
+                tp_mode="distributed",
+                use_syrk=self.use_syrk,
+                distributed_gram_recurrence=self.fsdp_distributed_ns_single_all_reduce,
+                distributed_gram_refresh_interval=self.fsdp_distributed_ns_gram_refresh_interval,
+            )
+            scale_factor = get_muon_scale_factor(p0.shape[-2], p0.shape[-1], mode=self.scale_mode)
+            orth_updates.mul_(scale_factor * self.extra_scale_factor)
         if not padded_local_rows and self._try_apply_orthogonal_muon_update_foreach(
             chunk, orth_updates
         ):
@@ -3158,6 +3167,62 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return None
         return flat_plan["flat_group"]
 
+    def _get_fsdp_distributed_ns_group_rank_numels(
+        self, dtensor_ref, fsdp_group: torch.distributed.ProcessGroup
+    ) -> list[int] | None:
+        plan = self._get_uneven_gather_plan(dtensor_ref)
+        if plan is None:
+            return None
+        if len(plan["stages"]) == 1 and plan["stages"][0]["shard_group"] is fsdp_group:
+            return plan["stages"][0]["rank_numels"]
+
+        flat_plan = self._get_flat_uneven_gather_plan(dtensor_ref, plan, require_flat_enabled=False)
+        if flat_plan is not None and flat_plan["flat_group"] is fsdp_group:
+            return flat_plan["flat_rank_numels"]
+        return None
+
+    def _get_fsdp_distributed_ns_runtime_group(
+        self, dtensor_ref, pre_ns_grad: torch.Tensor
+    ) -> tuple[torch.distributed.ProcessGroup | None, bool]:
+        fsdp_group = self._get_fsdp_distributed_ns_group(dtensor_ref)
+        if fsdp_group is None:
+            return None, False
+        if not self.fsdp_distributed_ns_nonempty_group:
+            return fsdp_group, True
+
+        rank_numels = self._get_fsdp_distributed_ns_group_rank_numels(dtensor_ref, fsdp_group)
+        if rank_numels is None:
+            return fsdp_group, True
+
+        group_ranks = torch.distributed.get_process_group_ranks(fsdp_group)
+        if len(group_ranks) != len(rank_numels):
+            return fsdp_group, True
+
+        nonempty_global_ranks = tuple(
+            rank for rank, rank_numel in zip(group_ranks, rank_numels) if rank_numel > 0
+        )
+        if len(nonempty_global_ranks) == len(group_ranks):
+            return fsdp_group, True
+
+        if not nonempty_global_ranks:
+            return None, False
+
+        global_rank = torch.distributed.get_rank()
+        participates = global_rank in nonempty_global_ranks
+        if not participates and pre_ns_grad.numel() != 0:
+            raise AssertionError(
+                "Muon+M-FSDP distributed NS nonempty subgroup excluded a rank " "with local data."
+            )
+
+        if len(nonempty_global_ranks) == 1:
+            return None, participates
+
+        cached_group = self._fsdp_nonempty_group_cache.get(nonempty_global_ranks)
+        if cached_group is None:
+            cached_group = torch.distributed.new_group(ranks=list(nonempty_global_ranks))
+            self._fsdp_nonempty_group_cache[nonempty_global_ranks] = cached_group
+        return cached_group, participates
+
     def _get_fsdp_partial_distributed_ns_plan(self, dtensor_ref) -> dict[str, Any] | None:
         if not self.fsdp_partial_distributed_ns or not self.fsdp_distributed_ns:
             return None
@@ -3309,8 +3374,10 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             orth_update.mul_(scale_factor * self.extra_scale_factor)
             return self._local_shard_from_partial_update_like(p, orth_update)
 
-        fsdp_group = self._get_fsdp_distributed_ns_group(p)
-        if fsdp_group is None:
+        fsdp_group, participates = self._get_fsdp_distributed_ns_runtime_group(p, pre_ns_grad)
+        if not participates:
+            return torch.empty_like(pre_ns_grad)
+        if fsdp_group is None and not self.fsdp_distributed_ns_nonempty_group:
             raise AssertionError(
                 "Muon+M-FSDP distributed NS was requested for an ineligible param."
             )
@@ -3327,44 +3394,50 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                     "Muon-FSDP distributed split-QKV NS/update "
                     f"component={component_idx} local_shape={tuple(component.shape)}"
                 ):
-                    orth_component = newton_schulz_tp(
-                        component,
-                        steps=self.num_ns_steps,
-                        coefficient_type=self.coefficient_type,
-                        tp_group=fsdp_group,
-                        partition_dim=0,
-                        tp_mode="distributed",
-                        use_syrk=self.use_syrk,
-                        distributed_gram_recurrence=self.fsdp_distributed_ns_single_all_reduce,
-                        distributed_gram_refresh_interval=(
-                            self.fsdp_distributed_ns_gram_refresh_interval
-                        ),
-                    )
-                    scale_factor = get_muon_scale_factor(
-                        num_query_groups * self.qkv_split_shapes[component_idx],
-                        p.shape[-1],
-                        mode=self.scale_mode,
-                    )
-                    orth_component.mul_(scale_factor * self.extra_scale_factor)
+                    if fsdp_group is None:
+                        orth_component = self.scaled_orthogonalize_fn(component, None, None)
+                    else:
+                        orth_component = newton_schulz_tp(
+                            component,
+                            steps=self.num_ns_steps,
+                            coefficient_type=self.coefficient_type,
+                            tp_group=fsdp_group,
+                            partition_dim=0,
+                            tp_mode="distributed",
+                            use_syrk=self.use_syrk,
+                            distributed_gram_recurrence=self.fsdp_distributed_ns_single_all_reduce,
+                            distributed_gram_refresh_interval=(
+                                self.fsdp_distributed_ns_gram_refresh_interval
+                            ),
+                        )
+                        scale_factor = get_muon_scale_factor(
+                            num_query_groups * self.qkv_split_shapes[component_idx],
+                            p.shape[-1],
+                            mode=self.scale_mode,
+                        )
+                        orth_component.mul_(scale_factor * self.extra_scale_factor)
                 for local_start, local_end, component_start, component_end in segments:
                     orth_update[local_start:local_end].copy_(
                         orth_component[component_start:component_end]
                     )
             return orth_update
 
-        orth_update = newton_schulz_tp(
-            pre_ns_grad,
-            steps=self.num_ns_steps,
-            coefficient_type=self.coefficient_type,
-            tp_group=fsdp_group,
-            partition_dim=0,
-            tp_mode="distributed",
-            use_syrk=self.use_syrk,
-            distributed_gram_recurrence=self.fsdp_distributed_ns_single_all_reduce,
-            distributed_gram_refresh_interval=self.fsdp_distributed_ns_gram_refresh_interval,
-        )
-        scale_factor = get_muon_scale_factor(p.shape[-2], p.shape[-1], mode=self.scale_mode)
-        orth_update.mul_(scale_factor * self.extra_scale_factor)
+        if fsdp_group is None:
+            orth_update = self.scaled_orthogonalize_fn(pre_ns_grad, None, None)
+        else:
+            orth_update = newton_schulz_tp(
+                pre_ns_grad,
+                steps=self.num_ns_steps,
+                coefficient_type=self.coefficient_type,
+                tp_group=fsdp_group,
+                partition_dim=0,
+                tp_mode="distributed",
+                use_syrk=self.use_syrk,
+                distributed_gram_recurrence=self.fsdp_distributed_ns_single_all_reduce,
+                distributed_gram_refresh_interval=self.fsdp_distributed_ns_gram_refresh_interval,
+            )
+            scale_factor = get_muon_scale_factor(p.shape[-2], p.shape[-1], mode=self.scale_mode)
+            orth_update.mul_(scale_factor * self.extra_scale_factor)
         return orth_update
 
     def _prepare_padded_all_gather_buffers(
