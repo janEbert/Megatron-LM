@@ -1956,7 +1956,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return None
         if update_mode in ("distributed", "partial_distributed") or pre_ns_grad is None:
             return None
-        if update_mode == "local_boundary" and self.fsdp_approx_local_boundary_global_norm_scale:
+        if (
+            update_mode == "local_boundary"
+            and self.fsdp_approx_local_boundary_global_norm_scale
+            and self.fsdp_approx_local_boundary_full_shape_scale
+        ):
             return None
         if not self._is_split_qkv_param(p) or self.qkv_split_shapes is None:
             return None
@@ -2565,7 +2569,12 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         return True
 
     def _apply_batched_qkv_muon_updates(
-        self, chunk: list, mode: str, shape: tuple[int, ...], split_dim: int
+        self,
+        chunk: list,
+        mode: str,
+        shape: tuple[int, ...],
+        split_dim: int,
+        precomputed_norm_scales: dict[int, torch.Tensor] | None = None,
     ) -> None:
         assert self.qkv_split_shapes is not None
         grad_shape = chunk[0][1].shape
@@ -2622,6 +2631,22 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         for components, (p, _, update_mode, lr, _) in zip(orth_components_by_update, chunk):
             cat_dim = 1 if split_dim == 0 else 2
             orth_update = torch.cat(components, dim=cat_dim).view(grad_shape)
+            if (
+                update_mode == "local_boundary"
+                and self.fsdp_approx_local_boundary_global_norm_scale
+            ):
+                if precomputed_norm_scales is None:
+                    raise AssertionError(
+                        "Missing precomputed local-boundary norm scales for "
+                        "batched split-QKV Muon update."
+                    )
+                norm_scale = precomputed_norm_scales.get(id(p))
+                if norm_scale is None:
+                    raise AssertionError(
+                        "Missing precomputed local-boundary norm scale for "
+                        "batched split-QKV Muon update."
+                    )
+                orth_update.mul_(norm_scale.to(device=orth_update.device, dtype=orth_update.dtype))
             self._apply_orthogonal_muon_update(p, orth_update, update_mode, lr)
 
     def _apply_precomputed_muon_updates(
@@ -2839,7 +2864,19 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                     f"Muon-FSDP batched split-QKV update mode={mode} "
                     f"shape={shape} split_dim={split_dim} count={len(chunk)}"
                 ):
-                    self._apply_batched_qkv_muon_updates(chunk, mode, shape, split_dim)
+                    precomputed_qkv_norm_scales = None
+                    if (
+                        mode == "local_boundary"
+                        and self.fsdp_approx_local_boundary_global_norm_scale
+                    ):
+                        precomputed_qkv_norm_scales = get_precomputed_norm_scales()
+                    self._apply_batched_qkv_muon_updates(
+                        chunk,
+                        mode,
+                        shape,
+                        split_dim,
+                        precomputed_norm_scales=precomputed_qkv_norm_scales,
+                    )
                 maybe_progress()
 
         self._maybe_log_fsdp_batched_ns_summary(
