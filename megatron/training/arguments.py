@@ -2489,6 +2489,13 @@ def _add_regularization_args(parser):
                        'finish only the Newton-Schulz/update after the boundary drain. '
                        'This preserves exact Muon math and changes only scheduling. '
                        'Defaults to false.')
+    group.add_argument('--muon-fsdp-approx-local-boundary-update',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='Approximate Muon+M-FSDP boundary updates by orthogonalizing '
+                       'local boundary shards without gathering the full tensor. This '
+                       'changes optimizer math and is intended only for guarded '
+                       'throughput/numerics experiments. Defaults to false.')
     group.add_argument('--muon-fsdp-overlap-local-ns-first',
                        action=argparse.BooleanOptionalAction,
                        default=False,
