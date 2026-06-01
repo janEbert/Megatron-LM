@@ -2520,6 +2520,19 @@ def _add_regularization_args(parser):
                        'finish only the Newton-Schulz/update after the boundary drain. '
                        'This preserves exact Muon math and changes only scheduling. '
                        'Defaults to false.')
+    group.add_argument('--muon-fsdp-prioritize-distributed-ns',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='Enqueue exact distributed Newton-Schulz batches before local '
+                       'Muon batches. This preserves update math and only changes '
+                       'scheduling across independent parameters. Defaults to false.')
+    group.add_argument('--muon-fsdp-approx-distributed-ns-update',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='With approximate local-boundary updates enabled, route '
+                       'otherwise eligible distributed Newton-Schulz tensors to the '
+                       'local-boundary approximation path. This changes optimizer math '
+                       'and is intended for throughput experiments. Defaults to false.')
     group.add_argument('--muon-fsdp-approx-local-boundary-update',
                        action=argparse.BooleanOptionalAction,
                        default=False,

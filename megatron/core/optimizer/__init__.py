@@ -793,6 +793,12 @@ def _get_muon_fsdp_kwargs(config: OptimizerConfig) -> dict[str, Any]:
         "fsdp_async_partial_distributed_gather": getattr(
             config, "muon_fsdp_async_partial_distributed_gather", False
         ),
+        "fsdp_prioritize_distributed_ns": getattr(
+            config, "muon_fsdp_prioritize_distributed_ns", False
+        ),
+        "fsdp_approx_distributed_ns_update": getattr(
+            config, "muon_fsdp_approx_distributed_ns_update", False
+        ),
         "fsdp_approx_local_boundary_update": getattr(
             config, "muon_fsdp_approx_local_boundary_update", False
         ),
