@@ -374,6 +374,12 @@ class OptimizerConfig:
     shape and size would otherwise be eligible for distributed Newton-Schulz.
     """
 
+    muon_fsdp_distributed_ns_nonempty_group: bool = False
+    """If True, distributed Newton-Schulz all-reduces use a cached subgroup containing only
+    ranks with nonempty FSDP shards for the parameter. Empty ranks skip the exact zero
+    contribution instead of joining the Gram all-reduce.
+    """
+
     muon_fsdp_partial_distributed_ns: bool = False
     """If True, exact mixed-shard Muon tensors may gather only the non-Newton-Schulz
     matrix dimension and then run distributed Newton-Schulz over the remaining shard
