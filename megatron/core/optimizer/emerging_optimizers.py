@@ -4063,15 +4063,32 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                     )
 
                 assigned_numel = 0
-                for rank, rank_buffer in enumerate(previous_rank_buffers):
-                    chunk_numel = plan["stages"][previous_stage_idx]["rank_numels"][rank]
-                    if chunk_numel == 0:
-                        continue
-                    source_offset = previous_rank_offsets[rank][batch_item_idx]
-                    local_buffer[
-                        local_offset + assigned_numel : local_offset + assigned_numel + chunk_numel
-                    ].copy_(rank_buffer[source_offset : source_offset + chunk_numel])
-                    assigned_numel += chunk_numel
+                if wait_for_previous:
+                    for rank, rank_buffer in enumerate(previous_rank_buffers):
+                        chunk_numel = plan["stages"][previous_stage_idx]["rank_numels"][rank]
+                        if chunk_numel == 0:
+                            continue
+                        source_offset = previous_rank_offsets[rank][batch_item_idx]
+                        target_start = local_offset + assigned_numel
+                        target_end = target_start + chunk_numel
+                        local_buffer[target_start:target_end].copy_(
+                            rank_buffer[source_offset : source_offset + chunk_numel]
+                        )
+                        assigned_numel += chunk_numel
+                else:
+                    chunks = []
+                    for rank, rank_buffer in enumerate(previous_rank_buffers):
+                        chunk_numel = plan["stages"][previous_stage_idx]["rank_numels"][rank]
+                        if chunk_numel == 0:
+                            continue
+                        source_offset = previous_rank_offsets[rank][batch_item_idx]
+                        chunks.append(rank_buffer[source_offset : source_offset + chunk_numel])
+                        assigned_numel += chunk_numel
+                    target = local_buffer[local_offset : local_offset + expected_numel]
+                    if len(chunks) == 1:
+                        target.copy_(chunks[0])
+                    elif chunks:
+                        torch.cat(chunks, out=target)
                 if assigned_numel != expected_numel:
                     raise AssertionError(
                         "Fused uneven DTensor gather repack did not cover the item: "
