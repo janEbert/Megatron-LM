@@ -1446,11 +1446,12 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         ):
                             continue
 
-                    if self.fsdp_foreach_pre_ns:
+                    grad = self._param_grad(p)
+                    if self.fsdp_foreach_pre_ns and grad is not None:
                         foreach_candidates.append(
                             {
                                 "param": p,
-                                "grad": self._param_grad(p),
+                                "grad": grad,
                                 "group": group,
                                 "group_kwargs": group_kwargs,
                                 "update_mode": update_mode,
