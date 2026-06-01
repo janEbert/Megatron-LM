@@ -297,7 +297,8 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
                 use_syrk=use_syrk,
             )
             scale_factor = get_muon_scale_factor(size[0], size[1], mode=scale_mode)
-            return orth_grad * scale_factor * extra_scale_factor
+            orth_grad.mul_(scale_factor * extra_scale_factor)
+            return orth_grad
 
         self.pg_collection = pg_collection
         self.tp_mode = tp_mode
@@ -1689,7 +1690,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             distributed_gram_refresh_interval=self.fsdp_distributed_ns_gram_refresh_interval,
         )
         scale_factor = get_muon_scale_factor(p0.shape[-2], p0.shape[-1], mode=self.scale_mode)
-        orth_updates = orth_updates * scale_factor * self.extra_scale_factor
+        orth_updates.mul_(scale_factor * self.extra_scale_factor)
         for batch_idx, (p, _, update_mode, lr, _) in enumerate(chunk):
             if padded_local_rows:
                 orth_update = orth_updates[batch_idx, : row_counts[batch_idx]]
@@ -1748,7 +1749,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             distributed_gram_refresh_interval=self.fsdp_distributed_ns_gram_refresh_interval,
         )
         scale_factor = get_muon_scale_factor(p0.shape[-2], p0.shape[-1], mode=self.scale_mode)
-        orth_updates = orth_updates * scale_factor * self.extra_scale_factor
+        orth_updates.mul_(scale_factor * self.extra_scale_factor)
         for orth_update, (p, _, update_mode, lr, _) in zip(orth_updates.unbind(0), chunk):
             local_update = self._local_shard_from_partial_update_like(p, orth_update)
             self._apply_orthogonal_muon_update(p, local_update, update_mode, lr)
@@ -3084,7 +3085,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 distributed_gram_refresh_interval=self.fsdp_distributed_ns_gram_refresh_interval,
             )
             scale_factor = get_muon_scale_factor(p.shape[-2], p.shape[-1], mode=self.scale_mode)
-            orth_update = orth_update * scale_factor * self.extra_scale_factor
+            orth_update.mul_(scale_factor * self.extra_scale_factor)
             return self._local_shard_from_partial_update_like(p, orth_update)
 
         fsdp_group = self._get_fsdp_distributed_ns_group(p)
@@ -3123,7 +3124,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         p.shape[-1],
                         mode=self.scale_mode,
                     )
-                    orth_component = orth_component * scale_factor * self.extra_scale_factor
+                    orth_component.mul_(scale_factor * self.extra_scale_factor)
                 for local_start, local_end, component_start, component_end in segments:
                     orth_update[local_start:local_end].copy_(
                         orth_component[component_start:component_end]
@@ -3142,7 +3143,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             distributed_gram_refresh_interval=self.fsdp_distributed_ns_gram_refresh_interval,
         )
         scale_factor = get_muon_scale_factor(p.shape[-2], p.shape[-1], mode=self.scale_mode)
-        return orth_update * scale_factor * self.extra_scale_factor
+        orth_update.mul_(scale_factor * self.extra_scale_factor)
+        return orth_update
 
     def _prepare_padded_all_gather_buffers(
         self,
