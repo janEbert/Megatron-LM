@@ -755,7 +755,38 @@ def _get_muon_fsdp_kwargs(config: OptimizerConfig) -> dict[str, Any]:
             config, "muon_fsdp_padded_all_gather_zero_pad", True
         ),
         "fsdp_fast_reconstruct": getattr(config, "muon_fsdp_fast_reconstruct", True),
+        "fsdp_boundary_gather_dtype": getattr(config, "muon_fsdp_boundary_gather_dtype", "fp32"),
+        "fsdp_distributed_ns": getattr(config, "muon_fsdp_distributed_ns", False),
+        "fsdp_distributed_ns_min_numel": getattr(config, "muon_fsdp_distributed_ns_min_numel", 0),
+        "fsdp_distributed_ns_small_col_dim": getattr(
+            config, "muon_fsdp_distributed_ns_small_col_dim", 0
+        ),
+        "fsdp_distributed_ns_single_all_reduce": getattr(
+            config, "muon_fsdp_distributed_ns_single_all_reduce", False
+        ),
+        "fsdp_distributed_ns_gram_refresh_interval": getattr(
+            config, "muon_fsdp_distributed_ns_gram_refresh_interval", 1
+        ),
+        "fsdp_distributed_ns_exclude_qkv": getattr(
+            config, "muon_fsdp_distributed_ns_exclude_qkv", False
+        ),
+        "fsdp_defer_distributed_ns_under_gather": getattr(
+            config, "muon_fsdp_defer_distributed_ns_under_gather", False
+        ),
         "fsdp_overlap_comm_compute": getattr(config, "muon_fsdp_overlap_comm_compute", False),
+        "fsdp_overlap_defer_boundary_batch_size": getattr(
+            config, "muon_fsdp_overlap_defer_boundary_batch_size", 1
+        ),
+        "fsdp_batched_newton_schulz": getattr(config, "muon_fsdp_batched_newton_schulz", False),
+        "fsdp_batched_newton_schulz_max_numel": getattr(
+            config, "muon_fsdp_batched_newton_schulz_max_numel", 16 * 1024 * 1024
+        ),
+        "fsdp_batched_newton_schulz_max_batch_bytes": getattr(
+            config, "muon_fsdp_batched_newton_schulz_max_batch_bytes", 2 * 1024 * 1024 * 1024
+        ),
+        "fsdp_batched_distributed_newton_schulz_max_batch_bytes": getattr(
+            config, "muon_fsdp_batched_distributed_newton_schulz_max_batch_bytes", 0
+        ),
     }
 
 
