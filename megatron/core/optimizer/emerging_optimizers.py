@@ -10,6 +10,7 @@ To add a new emerging optimizer:
 
 import inspect
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Literal, Optional, get_args
 
@@ -23,7 +24,6 @@ from megatron.core.utils import (
     get_pg_size,
     log_single_rank,
 )
-from megatron.training.utils import print_rank_0
 
 from .optimizer_config import ParamKey, ParamPredicate
 
@@ -500,6 +500,48 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self._fsdp_batched_ns_summary_logged_modes: set[str] = set()
         super().__init__(params, **kwargs)
 
+    def _fsdp_diagnostic_rank_info(self) -> tuple[int | None, int | None]:
+        if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+            return None, None
+        return torch.distributed.get_rank(), torch.distributed.get_world_size()
+
+    def _should_print_fsdp_diagnostic(self) -> bool:
+        rank, world_size = self._fsdp_diagnostic_rank_info()
+        if rank is None or world_size is None:
+            return True
+
+        selected_ranks = {0, 1, world_size - 1}
+        if world_size > 127:
+            selected_ranks.add(127)
+
+        rank_spec = os.environ.get("MUON_FSDP_DIAGNOSTIC_RANKS")
+        if rank_spec:
+            selected_ranks.clear()
+            for item in rank_spec.split(","):
+                item = item.strip().lower()
+                if not item:
+                    continue
+                if item == "all":
+                    return True
+                if item == "last":
+                    selected_ranks.add(world_size - 1)
+                    continue
+                try:
+                    selected_ranks.add(int(item))
+                except ValueError:
+                    continue
+        return rank in selected_ranks
+
+    def _fsdp_diagnostic_prefix(self) -> str:
+        rank, world_size = self._fsdp_diagnostic_rank_info()
+        if rank is None or world_size is None:
+            return ""
+        return f"[rank {rank}/{world_size}] "
+
+    def _maybe_print_fsdp_diagnostic(self, message) -> None:
+        if self._should_print_fsdp_diagnostic():
+            print(f"{self._fsdp_diagnostic_prefix()}{message}", flush=True)  # pylint: disable=W0141
+
     def _fsdp_gather_scratch_cache_bytes(self) -> int:
         total = 0
         for value in self._fsdp_gather_scratch_cache.values():
@@ -675,6 +717,18 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             min_items = max_items = 0
             avg_items = 0.0
 
+        boundary_shape_counts: dict[tuple[tuple[int, ...], tuple[int, ...], torch.dtype], int] = {}
+        for param, local_tensor in items:
+            shape_key = (tuple(param.shape), tuple(local_tensor.shape), local_tensor.dtype)
+            boundary_shape_counts[shape_key] = boundary_shape_counts.get(shape_key, 0) + 1
+        top_boundary_shapes = sorted(
+            boundary_shape_counts.items(), key=lambda item: item[1], reverse=True
+        )[:8]
+        top_boundary_shapes_text = ", ".join(
+            f"full={full_shape} local={local_shape} dtype={dtype}: {count}"
+            for (full_shape, local_shape, dtype), count in top_boundary_shapes
+        )
+
         message = (
             "Muon+M-FSDP gather summary: "
             f"boundary_items={len(items)}, completed_without_batch={completed_without_batch}, "
@@ -689,10 +743,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"overlap={self.fsdp_overlap_comm_compute}, "
             f"overlap_local_ns_first={self.fsdp_overlap_local_ns_first}, "
             f"prefetch_batches={self.fsdp_overlap_boundary_prefetch_batches}, "
-            f"defer_boundary_batch_size={self.fsdp_overlap_defer_boundary_batch_size}."
+            f"defer_boundary_batch_size={self.fsdp_overlap_defer_boundary_batch_size}, "
+            f"top_boundary_shapes=[{top_boundary_shapes_text}].",
         )
         log_single_rank(logger, logging.INFO, message)
-        print_rank_0(message)
+        self._maybe_print_fsdp_diagnostic(message)
 
     def _gather_collective_nvtx_label(self, stage_state: dict[str, Any]) -> str:
         batch = stage_state["batch"]
@@ -717,10 +772,13 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         qkv_counts = {"local": 0, "gather": 0, "distributed": 0}
         named_qkv_counts = {"local": 0, "gather": 0, "distributed": 0}
         attr_qkv_counts = {"local": 0, "gather": 0, "distributed": 0}
+        update_shape_counts: dict[tuple[str, tuple[int, ...]], int] = {}
         for param, pre_ns_grad, update_mode, _, _ in all_updates:
             mode_counts[update_mode] = mode_counts.get(update_mode, 0) + 1
             tensor = pre_ns_grad if pre_ns_grad is not None else param._local_tensor
             mode_numels[update_mode] = mode_numels.get(update_mode, 0) + tensor.numel()
+            shape_key = (update_mode, tuple(tensor.shape))
+            update_shape_counts[shape_key] = update_shape_counts.get(shape_key, 0) + 1
             if getattr(param, "is_qkv", False) or getattr(
                 getattr(param, "orig_param", None), "is_qkv", False
             ):
@@ -729,6 +787,13 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 named_qkv_counts[update_mode] = named_qkv_counts.get(update_mode, 0) + 1
             if self._is_split_qkv_param(param):
                 qkv_counts[update_mode] = qkv_counts.get(update_mode, 0) + 1
+
+        top_update_shapes = sorted(
+            update_shape_counts.items(), key=lambda item: item[1], reverse=True
+        )[:8]
+        top_update_shapes_text = ", ".join(
+            f"{mode}{shape}: {count}" for (mode, shape), count in top_update_shapes
+        )
 
         message = (
             "Muon+M-FSDP update mode summary: "
@@ -751,10 +816,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"distributed_ns_exclude_qkv={self.fsdp_distributed_ns_exclude_qkv}, "
             f"defer_distributed_ns_under_gather={self.fsdp_defer_distributed_ns_under_gather}, "
             f"distributed_ns_small_col_dim={self.fsdp_distributed_ns_small_col_dim}, "
-            f"distributed_ns_min_numel={self.fsdp_distributed_ns_min_numel}."
+            f"distributed_ns_min_numel={self.fsdp_distributed_ns_min_numel}, "
+            f"top_update_shapes=[{top_update_shapes_text}]."
         )
         log_single_rank(logger, logging.INFO, message)
-        print_rank_0(message)
+        self._maybe_print_fsdp_diagnostic(message)
 
     def _process_group_size_if_member(
         self, group: torch.distributed.ProcessGroup | None
@@ -1280,7 +1346,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"top_fallback_shapes=[{top_fallback_shapes_text}]."
         )
         log_single_rank(logger, logging.INFO, message)
-        print_rank_0(message)
+        self._maybe_print_fsdp_diagnostic(message)
 
     def _apply_orthogonal_muon_update(
         self, p: torch.Tensor, orth_update: torch.Tensor, update_mode: str, lr: float
