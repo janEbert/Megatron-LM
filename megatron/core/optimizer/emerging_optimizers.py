@@ -680,6 +680,13 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             gathered_numel = sum(rank_total_numels)
         return gathered_numel * element_size
 
+    def _boundary_gather_wire_element_size(self, fallback_dtype: torch.dtype) -> int:
+        if self.fsdp_boundary_gather_dtype in ("int8", "fp8_e4m3fn", "fp8_e5m2"):
+            return 1
+        if self.fsdp_boundary_gather_dtype == "bf16":
+            return torch.empty((), dtype=torch.bfloat16).element_size()
+        return torch.empty((), dtype=fallback_dtype).element_size()
+
     def _batch_uses_padded_all_gather(self, rank_total_numels: list[int]) -> bool:
         return (
             self.fsdp_padded_all_gather
@@ -739,6 +746,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         else:
             min_items = max_items = 0
             avg_items = 0.0
+        wire_element_size = (
+            self._boundary_gather_wire_element_size(items[0][1].dtype) if items else 0
+        )
 
         boundary_shape_counts: dict[tuple[tuple[int, ...], tuple[int, ...], torch.dtype], int] = {}
         for param, local_tensor in items:
@@ -762,6 +772,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"max_collective_mib={max_gather_bytes / (1024 ** 2):.1f}, "
             f"max_gather_gib={self.fsdp_batch_max_gather_bytes / (1024 ** 3):.2f}, "
             f"boundary_gather_dtype={self.fsdp_boundary_gather_dtype}, "
+            f"wire_element_size={wire_element_size}, "
             f"flat={self.fsdp_flat_batched_all_gather}, "
             f"overlap={self.fsdp_overlap_comm_compute}, "
             f"overlap_local_ns_first={self.fsdp_overlap_local_ns_first}, "
@@ -3525,7 +3536,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             stage_group_key = tuple(id(stage["shard_group"]) for stage in plan["stages"])
             key = (stage_group_key, local_tensor.dtype, local_tensor.device)
             key_batches = batches.setdefault(key, [])
-            element_size = local_tensor.element_size()
+            element_size = self._boundary_gather_wire_element_size(local_tensor.dtype)
             if not key_batches:
                 key_batches.append(
                     {
@@ -3582,7 +3593,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
             key = (id(flat_plan["flat_group"]), local_tensor.dtype, local_tensor.device)
             key_batches = batches.setdefault(key, [])
-            element_size = local_tensor.element_size()
+            element_size = self._boundary_gather_wire_element_size(local_tensor.dtype)
             if not key_batches:
                 key_batches.append(
                     {
