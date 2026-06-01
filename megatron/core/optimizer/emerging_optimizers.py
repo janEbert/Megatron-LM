@@ -2457,24 +2457,36 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             self._apply_orthogonal_muon_update(p, orth_update, update_mode, lr)
             return
 
+        full_shape_boundary_scale = (
+            update_mode == "local_boundary"
+            and self.fsdp_approx_local_boundary_full_shape_scale
+            and not self._is_split_qkv_param(p)
+            and self._tp_partition_dim_for_param(p) is None
+        )
+        norm_scale = None
+        if (
+            update_mode == "local_boundary"
+            and self.fsdp_approx_local_boundary_global_norm_scale
+            and not full_shape_boundary_scale
+        ):
+            norm_scale = self._get_approx_local_boundary_global_norm_scale(p, pre_ns_grad)
+            if pre_ns_grad.numel() == 0:
+                return
+
         with torch.autograd.profiler.record_function(
             f"Muon-FSDP individual NS/update mode={update_mode} shape={tuple(pre_ns_grad.shape)}"
         ):
-            if (
-                update_mode == "local_boundary"
-                and self.fsdp_approx_local_boundary_full_shape_scale
-                and not self._is_split_qkv_param(p)
-                and self._tp_partition_dim_for_param(p) is None
-            ):
+            if full_shape_boundary_scale:
                 orth_update = self._approx_local_boundary_orthogonalize(p, pre_ns_grad).to(
                     dtype=p._local_tensor.dtype
                 )
             else:
-                orth_update = (
-                    super(FSDPTensorParallelMuon, self)
-                    .orthogonalize(p, pre_ns_grad, **group_kwargs)
-                    .to(dtype=p._local_tensor.dtype)
+                orth_update = super(FSDPTensorParallelMuon, self).orthogonalize(
+                    p, pre_ns_grad, **group_kwargs
                 )
+                if norm_scale is not None:
+                    orth_update.mul_(norm_scale)
+                orth_update = orth_update.to(dtype=p._local_tensor.dtype)
         self._apply_orthogonal_muon_update(p, orth_update, update_mode, lr)
 
     def _attach_boundary_ready_events(self, batches: list[dict[str, Any]]) -> None:
