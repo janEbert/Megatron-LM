@@ -456,6 +456,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_batched_newton_schulz_max_batch_bytes: int = 2 * 1024 * 1024 * 1024,
         fsdp_batched_distributed_newton_schulz_max_batch_bytes: int = 0,
         fsdp_foreach_weight_update: bool = False,
+        fsdp_foreach_gather_weight_update: bool = False,
         **kwargs: Any,
     ) -> None:
         assert _HAVE_DTENSOR, (
@@ -512,6 +513,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             or fsdp_batched_newton_schulz_max_batch_bytes
         )
         self.fsdp_foreach_weight_update = fsdp_foreach_weight_update
+        self.fsdp_foreach_gather_weight_update = fsdp_foreach_gather_weight_update
         self._boundary_gather_indices_cache: dict[tuple[int, ...], set[int]] = {}
         self._uneven_gather_plan_cache: dict[int, dict[str, Any]] = {}
         self._partial_uneven_gather_plan_cache: dict[
@@ -1838,10 +1840,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         if any(update[3] != first_lr for update in chunk):
             return False
 
-        # Gather-mode updates require per-parameter slicing from the full
-        # gathered tensor. Keep them on the existing path and batch the common
-        # local/distributed chunks where each update already matches the local shard.
-        if any(update[2] == "gather" for update in chunk):
+        has_gather_update = any(update[2] == "gather" for update in chunk)
+        if has_gather_update and not self.fsdp_foreach_gather_weight_update:
             return False
 
         param_tensors = [update[0]._local_tensor for update in chunk]
@@ -1849,13 +1849,15 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         if any(param_tensor.dtype != target_dtype for param_tensor in param_tensors):
             return False
 
-        local_updates = orth_updates
-        if local_updates.dtype != target_dtype:
-            local_updates = local_updates.to(dtype=target_dtype)
-
         update_tensors = []
-        for batch_idx, param_tensor in enumerate(param_tensors):
-            update_tensor = local_updates[batch_idx]
+        for batch_idx, (param_tensor, update) in enumerate(zip(param_tensors, chunk)):
+            p, _, update_mode, _, _ = update
+            if update_mode == "gather":
+                update_tensor = self._local_shard_from_full_update_like(p, orth_updates[batch_idx])
+            else:
+                update_tensor = orth_updates[batch_idx]
+                if update_tensor.dtype != target_dtype:
+                    update_tensor = update_tensor.to(dtype=target_dtype)
             if tuple(update_tensor.shape) != tuple(param_tensor.shape):
                 return False
             update_tensors.append(update_tensor)
