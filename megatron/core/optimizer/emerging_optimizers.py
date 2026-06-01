@@ -448,6 +448,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_defer_distributed_ns_under_gather: bool = False,
         fsdp_defer_partial_distributed_ns_under_gather: bool = False,
         fsdp_async_partial_distributed_gather: bool = False,
+        fsdp_approx_local_boundary_update: bool = False,
         fsdp_overlap_local_ns_first: bool = False,
         fsdp_overlap_comm_compute: bool = False,
         fsdp_overlap_boundary_ready_event: bool = False,
@@ -504,6 +505,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             fsdp_defer_partial_distributed_ns_under_gather
         )
         self.fsdp_async_partial_distributed_gather = fsdp_async_partial_distributed_gather
+        self.fsdp_approx_local_boundary_update = fsdp_approx_local_boundary_update
         self.fsdp_overlap_local_ns_first = fsdp_overlap_local_ns_first
         self.fsdp_overlap_comm_compute = fsdp_overlap_comm_compute
         self.fsdp_overlap_boundary_ready_event = fsdp_overlap_boundary_ready_event
@@ -938,6 +940,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"({mode_numels.get('distributed', 0) / 1e9:.3f}B local elems), "
             f"partial_distributed_ns={mode_counts.get('partial_distributed', 0)} "
             f"({mode_numels.get('partial_distributed', 0) / 1e9:.3f}B local elems), "
+            f"approx_local_boundary={mode_counts.get('local_boundary', 0)} "
+            f"({mode_numels.get('local_boundary', 0) / 1e9:.3f}B local elems), "
             f"qkv_local/gather/distributed/partial={qkv_counts.get('local', 0)}/"
             f"{qkv_counts.get('gather', 0)}/{qkv_counts.get('distributed', 0)}/"
             f"{qkv_counts.get('partial_distributed', 0)}, "
@@ -957,6 +961,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"defer_distributed_ns_under_gather={self.fsdp_defer_distributed_ns_under_gather}, "
             "defer_partial_distributed_ns_under_gather="
             f"{self.fsdp_defer_partial_distributed_ns_under_gather}, "
+            f"approx_local_boundary_update={self.fsdp_approx_local_boundary_update}, "
             f"distributed_ns_small_col_dim={self.fsdp_distributed_ns_small_col_dim}, "
             f"distributed_ns_min_numel={self.fsdp_distributed_ns_min_numel}, "
             f"partial_distributed_candidates={partial_distributed_candidate_count} "
@@ -1325,11 +1330,12 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                     )
                     if overlap_enabled and update_mode == "gather":
                         continue
-                    if local_only is True and update_mode != "local":
+                    is_local_update = update_mode in ("local", "local_boundary")
+                    if local_only is True and not is_local_update:
                         continue
-                    if local_only is False and update_mode == "local":
+                    if local_only is False and is_local_update:
                         continue
-                    if p._local_tensor.numel() == 0 and update_mode == "local":
+                    if p._local_tensor.numel() == 0 and is_local_update:
                         # If this parameter is not split by Megatron-FSDP,
                         # and is empty on this DP rank, then we can skip this
                         # update for all TP ranks, as tensor parallelism uses
@@ -3412,6 +3418,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return "distributed"
         if self._get_fsdp_partial_distributed_ns_plan(param) is not None:
             return "partial_distributed"
+        if self.fsdp_approx_local_boundary_update:
+            return "local_boundary"
         return "gather"
 
     def _distributed_fsdp_orthogonalize(

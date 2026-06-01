@@ -2060,6 +2060,7 @@ class TestFSDPFactoryIntegration:
         assert config.muon_fsdp_batch_max_gather_bytes == 1024 * 1024 * 1024
         assert config.muon_fsdp_padded_all_gather_zero_pad
         assert config.muon_fsdp_fast_reconstruct
+        assert not config.muon_fsdp_approx_local_boundary_update
         assert not config.muon_fsdp_overlap_comm_compute
 
     @pytest.mark.parametrize("strategy", ["no_shard", "optim", "optim_grads", "optim_grads_params"])
@@ -2114,6 +2115,7 @@ class TestFSDPFactoryIntegration:
             muon_fsdp_batch_max_gather_bytes=123456,
             muon_fsdp_padded_all_gather_zero_pad=False,
             muon_fsdp_fast_reconstruct=False,
+            muon_fsdp_approx_local_boundary_update=True,
             muon_fsdp_overlap_comm_compute=True,
         )
         pg_collection = ProcessGroupCollection.use_mpu_process_groups()
@@ -2164,4 +2166,5 @@ class TestFSDPFactoryIntegration:
             assert base_opt.fsdp_batch_max_gather_bytes == 123456
             assert not base_opt.fsdp_padded_all_gather_zero_pad
             assert not base_opt.fsdp_fast_reconstruct
+            assert base_opt.fsdp_approx_local_boundary_update
             assert base_opt.fsdp_overlap_comm_compute
