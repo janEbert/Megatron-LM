@@ -1637,9 +1637,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return False
         mom_local = self.state[p]["momentum_buffer"]._local_tensor
         local_grad = grad._local_tensor
-        if local_grad.dtype != mom_local.dtype:
-            return False
         if local_grad.shape != mom_local.shape or p_local.shape != mom_local.shape:
+            return False
+        if p_local.device != mom_local.device or local_grad.device != mom_local.device:
             return False
         weight_decay = group["weight_decay"]
         weight_decay_method = getattr(self, "weight_decay_method", "l2")
@@ -2064,7 +2064,6 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         if (
             p_local.shape != mom_local.shape
             or local_grad.shape != mom_local.shape
-            or local_grad.dtype != mom_local.dtype
             or p_local.device != mom_local.device
             or local_grad.device != mom_local.device
         ):
@@ -2122,17 +2121,25 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         if any(mom_tensor.dtype != mom_tensors[0].dtype for mom_tensor in mom_tensors):
             return None
         grad_tensors = []
+        cast_grad_count = 0
+        mom_dtype = mom_tensors[0].dtype
         for p, _, _, _, _ in chunk:
             grad = self._param_grad(p)
             if grad is None:
                 return None
             local_grad = grad._local_tensor
-            if local_grad.dtype != mom_tensors[0].dtype:
+            if local_grad.shape != mom_tensors[0].shape:
                 return None
+            if local_grad.device != mom_tensors[0].device:
+                return None
+            if local_grad.dtype != mom_dtype:
+                cast_grad_count += 1
+                local_grad = local_grad.to(dtype=mom_dtype)
             grad_tensors.append(local_grad)
 
         with torch.autograd.profiler.record_function(
-            f"Muon-FSDP deferred local pre-NS stack count={len(chunk)}"
+            f"Muon-FSDP deferred local pre-NS stack count={len(chunk)} "
+            f"cast_grads={cast_grad_count}"
         ):
             if weight_decay != 0.0:
                 torch._foreach_add_(p_tensors, p_tensors, alpha=-(weight_decay * lr))
