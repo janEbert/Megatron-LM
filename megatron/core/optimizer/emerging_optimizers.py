@@ -1907,12 +1907,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return None
         if pre_ns_grad.numel() > self.fsdp_batched_newton_schulz_max_numel:
             return None
-        if self._is_split_qkv_param(p):
-            # Unaligned local-boundary QKV shards already fall back to unsplit
-            # orthogonalization. Batch only that existing fallback math here.
-            if self._qkv_split_dim_for_shape(pre_ns_grad.shape) is not None:
-                return None
-        if self._tp_partition_dim_for_param(p) is not None:
+        if self._is_split_qkv_param(p) or self._tp_partition_dim_for_param(p) is not None:
             return None
         scale_shape: tuple[int, ...] = ()
         if update_mode == "local_boundary" and self.fsdp_approx_local_boundary_full_shape_scale:
