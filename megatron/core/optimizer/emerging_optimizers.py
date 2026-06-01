@@ -782,6 +782,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         named_qkv_counts = {"local": 0, "gather": 0, "distributed": 0}
         attr_qkv_counts = {"local": 0, "gather": 0, "distributed": 0}
         update_shape_counts: dict[tuple[str, tuple[int, ...]], int] = {}
+        partial_distributed_candidate_count = 0
+        partial_distributed_candidate_numels = 0
+        partial_distributed_shape_counts: dict[
+            tuple[tuple[int, ...], tuple[int, ...], int, tuple[tuple[int, int, int], ...]], int
+        ] = {}
         for param, pre_ns_grad, update_mode, _, _ in all_updates:
             mode_counts[update_mode] = mode_counts.get(update_mode, 0) + 1
             tensor = pre_ns_grad if pre_ns_grad is not None else param._local_tensor
@@ -796,12 +801,33 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 named_qkv_counts[update_mode] = named_qkv_counts.get(update_mode, 0) + 1
             if self._is_split_qkv_param(param):
                 qkv_counts[update_mode] = qkv_counts.get(update_mode, 0) + 1
+            candidate_key = self._partial_distributed_ns_candidate_key(param, tensor, update_mode)
+            if candidate_key is not None:
+                partial_distributed_candidate_count += 1
+                partial_distributed_candidate_numels += tensor.numel()
+                partial_distributed_shape_counts[candidate_key] = (
+                    partial_distributed_shape_counts.get(candidate_key, 0) + 1
+                )
 
         top_update_shapes = sorted(
             update_shape_counts.items(), key=lambda item: item[1], reverse=True
         )[:8]
         top_update_shapes_text = ", ".join(
             f"{mode}{shape}: {count}" for (mode, shape), count in top_update_shapes
+        )
+        top_partial_distributed_shapes = sorted(
+            partial_distributed_shape_counts.items(), key=lambda item: item[1], reverse=True
+        )[:8]
+        top_partial_distributed_shapes_text = ", ".join(
+            "full="
+            f"{full_shape} local={local_shape} partition_dim={partition_dim} "
+            f"placements={placement_signature}: {count}"
+            for (
+                full_shape,
+                local_shape,
+                partition_dim,
+                placement_signature,
+            ), count in top_partial_distributed_shapes
         )
 
         message = (
@@ -826,10 +852,57 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"defer_distributed_ns_under_gather={self.fsdp_defer_distributed_ns_under_gather}, "
             f"distributed_ns_small_col_dim={self.fsdp_distributed_ns_small_col_dim}, "
             f"distributed_ns_min_numel={self.fsdp_distributed_ns_min_numel}, "
+            f"partial_distributed_candidates={partial_distributed_candidate_count} "
+            f"({partial_distributed_candidate_numels / 1e9:.3f}B local elems), "
+            f"top_partial_distributed_candidates=[{top_partial_distributed_shapes_text}], "
             f"top_update_shapes=[{top_update_shapes_text}]."
         )
         log_single_rank(logger, logging.INFO, message)
         self._maybe_print_fsdp_diagnostic(message)
+
+    def _partial_distributed_ns_candidate_key(
+        self, param: torch.Tensor, local_tensor: torch.Tensor, update_mode: str
+    ) -> tuple[tuple[int, ...], tuple[int, ...], int, tuple[tuple[int, int, int], ...]] | None:
+        if update_mode != "gather" or not self.fsdp_distributed_ns:
+            return None
+        if _DTensor is None or not isinstance(param, _DTensor):
+            return None
+        if len(param.shape) != 2:
+            return None
+
+        rows, cols = int(param.shape[-2]), int(param.shape[-1])
+        partition_dim = 0 if rows > cols else 1
+        placement_signature = []
+        has_partition_shard = False
+        has_other_matrix_shard = False
+        shard_placement_types = (Shard, _StridedShard)
+        for mesh_dim, placement in enumerate(param.placements):
+            if isinstance(placement, Replicate):
+                continue
+            if not isinstance(placement, shard_placement_types):
+                return None
+            shard_dim = getattr(placement, "dim", None)
+            if shard_dim not in (0, 1):
+                return None
+            try:
+                group_size = get_pg_size(param.device_mesh.get_group(mesh_dim))
+            except (RuntimeError, ValueError, TypeError, AttributeError):
+                group_size = -1
+            placement_signature.append((int(mesh_dim), int(shard_dim), int(group_size)))
+            if shard_dim == partition_dim:
+                has_partition_shard = True
+            else:
+                has_other_matrix_shard = True
+
+        if not has_partition_shard or not has_other_matrix_shard:
+            return None
+
+        return (
+            tuple(int(dim) for dim in param.shape),
+            tuple(int(dim) for dim in local_tensor.shape),
+            partition_dim,
+            tuple(placement_signature),
+        )
 
     def _maybe_log_mfsdp_boundary_layout_summary(
         self, params: list[torch.Tensor], boundary_indices: set[int]
