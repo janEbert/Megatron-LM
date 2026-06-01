@@ -376,6 +376,12 @@ class OptimizerConfig:
     Requires batched all-gather to take effect. Defaults to False.
     """
 
+    muon_fsdp_overlap_boundary_prefetch_batches: int = 1
+    """Number of Muon+M-FSDP boundary gather batches to keep queued during overlap.
+    Values above 1 use distinct gather scratch scopes to double-buffer communication
+    and reduce gaps between NCCL all-gathers. The math is unchanged.
+    """
+
     muon_fsdp_overlap_defer_boundary_batch_size: int = 1
     """Minimum same-key completed Muon+M-FSDP boundary updates to collect before applying
     them during overlap. A value of 1 applies completed boundary updates immediately.
