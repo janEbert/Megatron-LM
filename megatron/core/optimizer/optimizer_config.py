@@ -330,6 +330,13 @@ class OptimizerConfig:
     optimizer math while avoiding per-item intermediate unpack buffers.
     """
 
+    muon_fsdp_boundary_pre_ns_into_gather_buffer: bool = False
+    """If True, compute exact gather-mode boundary pre-Newton-Schulz tensors directly into the
+    stage-0 Muon+M-FSDP gather send buffer when the wire dtype matches the local momentum dtype.
+    This preserves optimizer math and removes the separate per-item pre-NS materialization plus
+    stage-0 pack copy for eligible overlapped boundary gathers. Defaults to False.
+    """
+
     muon_fsdp_boundary_batch_sort_by_size: bool = False
     """If True, deterministically launch larger Muon+M-FSDP boundary gather batches first within
     each identical communicator/stage group. This preserves per-communicator collective order and

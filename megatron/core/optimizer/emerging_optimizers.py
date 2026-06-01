@@ -439,6 +439,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_batch_max_gather_bytes: int = 1024 * 1024 * 1024,
         fsdp_padded_all_gather_zero_pad: bool = True,
         fsdp_fused_async_gather_repack: bool = False,
+        fsdp_boundary_pre_ns_into_gather_buffer: bool = False,
         fsdp_boundary_batch_sort_by_size: bool = False,
         fsdp_fast_reconstruct: bool = True,
         fsdp_boundary_gather_dtype: str = "fp32",
@@ -489,6 +490,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.fsdp_batch_max_gather_bytes = fsdp_batch_max_gather_bytes
         self.fsdp_padded_all_gather_zero_pad = fsdp_padded_all_gather_zero_pad
         self.fsdp_fused_async_gather_repack = fsdp_fused_async_gather_repack
+        self.fsdp_boundary_pre_ns_into_gather_buffer = fsdp_boundary_pre_ns_into_gather_buffer
         self.fsdp_boundary_batch_sort_by_size = fsdp_boundary_batch_sort_by_size
         self.fsdp_fast_reconstruct = fsdp_fast_reconstruct
         supported_boundary_gather_dtypes = ("fp32", "bf16", "int8", "fp8_e4m3fn", "fp8_e5m2")
@@ -852,6 +854,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"flat={self.fsdp_flat_batched_all_gather}, "
             f"flat_nonempty_group={self.fsdp_flat_batched_all_gather_nonempty_group}, "
             f"fused_async_repack={self.fsdp_fused_async_gather_repack}, "
+            "boundary_pre_ns_into_gather_buffer="
+            f"{self.fsdp_boundary_pre_ns_into_gather_buffer}, "
             f"batch_sort_by_size={self.fsdp_boundary_batch_sort_by_size}, "
             f"overlap={self.fsdp_overlap_comm_compute}, "
             f"overlap_local_ns_first={self.fsdp_overlap_local_ns_first}, "
@@ -1333,6 +1337,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
         early_gather_state = None
         boundary_update_indices = []
+        direct_boundary_pre_ns = (
+            self.fsdp_boundary_pre_ns_into_gather_buffer
+            and self.fsdp_boundary_gather_dtype not in ("int8", "fp8_e4m3fn", "fp8_e5m2")
+            and not self.fsdp_flat_batched_all_gather
+        )
         if overlap_enabled:
             # Boundary pre-NS tensors are the only values needed by the
             # all-gather. Compute them first and launch communication before
@@ -1344,7 +1353,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                             continue
                         if self._fsdp_boundary_update_mode(p) != "gather":
                             continue
-                        pre_ns_grad = self._compute_local_pre_ns_grad(p, group, lr)
+                        pre_ns_grad = (
+                            None
+                            if direct_boundary_pre_ns
+                            else self._compute_local_pre_ns_grad(p, group, lr)
+                        )
                         boundary_update_indices.append(len(all_updates))
                         all_updates.append((p, pre_ns_grad, "gather", lr, group_kwargs))
 
@@ -1353,7 +1366,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                     "Muon-FSDP phase 2a start overlapped boundary gather"
                 ):
                     early_gather_state = self._start_overlap_boundary_gathers(
-                        all_updates, boundary_update_indices
+                        all_updates, boundary_update_indices, direct_pre_ns=direct_boundary_pre_ns
                     )
 
         from emerging_optimizers import utils
@@ -1493,11 +1506,23 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         return loss
 
     def _compute_local_pre_ns_grad(
-        self, p: torch.Tensor, group: dict[str, Any], lr: float
+        self, p: torch.Tensor, group: dict[str, Any], lr: float, out: torch.Tensor | None = None
     ) -> torch.Tensor:
         p_local = p._local_tensor
         state = self.state[p]
         mom_local = state["momentum_buffer"]._local_tensor
+        if out is not None:
+            if tuple(out.shape) != tuple(mom_local.shape):
+                raise AssertionError(
+                    "Direct Muon+M-FSDP boundary pre-NS output shape mismatch: "
+                    f"got {tuple(out.shape)}, expected {tuple(mom_local.shape)}."
+                )
+            if out.dtype != mom_local.dtype:
+                raise AssertionError(
+                    "Direct Muon+M-FSDP boundary pre-NS requires the gather buffer "
+                    "dtype to match the local momentum dtype to preserve exact math: "
+                    f"buffer={out.dtype}, momentum={mom_local.dtype}."
+                )
 
         grad = self._param_grad(p)
         local_grad = grad._local_tensor if grad is not None else torch.zeros_like(mom_local)
@@ -1506,6 +1531,13 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
         self._apply_weight_decay_inplace(p_local, local_grad, lr, group["weight_decay"])
         mom_local.lerp_(local_grad, 1 - group["momentum"])
+        if out is not None:
+            if self.nesterov:
+                out.copy_(local_grad)
+                out.lerp_(mom_local, group["momentum"])
+            else:
+                out.copy_(mom_local)
+            return out
         if self.nesterov:
             return local_grad.lerp(mom_local, group["momentum"])
         return mom_local
@@ -1514,6 +1546,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         if self.fsdp_boundary_gather_dtype == "bf16" and tensor.dtype != torch.bfloat16:
             return tensor.to(dtype=torch.bfloat16)
         return tensor
+
+    def _boundary_gather_wire_dtype(self, fallback_dtype: torch.dtype) -> torch.dtype:
+        if self.fsdp_boundary_gather_dtype == "bf16":
+            return torch.bfloat16
+        return fallback_dtype
 
     def _restore_boundary_gather_tensor(
         self, gathered_tensor: torch.Tensor | None, reference_tensor: torch.Tensor | None
@@ -2616,13 +2653,32 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 ready_events[device] = event
             batch["_boundary_ready_event"] = event
 
+    def _direct_boundary_gather_item_ref(self, p: torch.Tensor) -> torch.Tensor:
+        """Return a metadata tensor for direct pre-NS gather-buffer planning.
+
+        The returned tensor is not used as data.  It only supplies shape, dtype,
+        and device to the existing batch planner before the real pre-NS values
+        are written directly into the stage-0 gather buffer.
+        """
+        mom_local = self.state[p]["momentum_buffer"]._local_tensor
+        wire_dtype = self._boundary_gather_wire_dtype(mom_local.dtype)
+        if p._local_tensor.dtype == wire_dtype:
+            return p._local_tensor
+        return torch.empty(p._local_tensor.shape, dtype=wire_dtype, device=p._local_tensor.device)
+
     def _start_overlap_boundary_gathers(
-        self, all_updates: list, boundary_update_indices: list[int]
+        self, all_updates: list, boundary_update_indices: list[int], *, direct_pre_ns: bool = False
     ) -> dict[str, Any]:
-        boundary_items = [
-            (all_updates[i][0], self._prepare_boundary_gather_tensor(all_updates[i][1]))
-            for i in boundary_update_indices
-        ]
+        if direct_pre_ns:
+            boundary_items = [
+                (all_updates[i][0], self._direct_boundary_gather_item_ref(all_updates[i][0]))
+                for i in boundary_update_indices
+            ]
+        else:
+            boundary_items = [
+                (all_updates[i][0], self._prepare_boundary_gather_tensor(all_updates[i][1]))
+                for i in boundary_update_indices
+            ]
         gathered_boundary_updates: list[torch.Tensor | None] = [None] * len(boundary_items)
         completed_item_indices: set[int] = set()
         batches = self._build_full_uneven_local_tensor_gather_batches(
@@ -2645,7 +2701,10 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             if use_prefetch_scratch_scopes:
                 next_batch["_scratch_scope"] = ("boundary_prefetch", slot)
             pending = self._start_gather_full_uneven_local_tensor_batch_async(
-                boundary_items, next_batch
+                boundary_items,
+                next_batch,
+                all_updates=all_updates if direct_pre_ns else None,
+                boundary_update_indices=boundary_update_indices if direct_pre_ns else None,
             )
             pending_queue.append((pending, slot))
 
@@ -2656,6 +2715,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             "batch_iter": batch_iter,
             "pending_queue": pending_queue,
             "use_prefetch_scratch_scopes": use_prefetch_scratch_scopes,
+            "direct_pre_ns": direct_pre_ns,
         }
 
     def _overlap_boundary_gather_and_update(
@@ -2689,6 +2749,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             )
             > 1,
         )
+        direct_pre_ns = bool(gather_state.get("direct_pre_ns", False))
         applied_update_indices = applied_update_indices or set()
 
         deferred_distributed_updates = []
@@ -2749,7 +2810,10 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 "Muon-FSDP phase 2c start next boundary gather"
             ):
                 next_pending = self._start_gather_full_uneven_local_tensor_batch_async(
-                    boundary_items, next_batch
+                    boundary_items,
+                    next_batch,
+                    all_updates=all_updates if direct_pre_ns else None,
+                    boundary_update_indices=boundary_update_indices if direct_pre_ns else None,
                 )
             pending_queue.append((next_pending, slot))
             return True
@@ -4978,11 +5042,148 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             )
         return item_indices
 
+    def _prepare_uneven_gather_stage_direct_pre_ns(
+        self,
+        items: list[tuple[torch.Tensor, torch.Tensor]],
+        batch: dict[str, Any],
+        all_updates: list,
+        boundary_update_indices: list[int],
+    ) -> dict[str, Any]:
+        with torch.autograd.profiler.record_function(
+            "Muon-FSDP gather direct pre-NS into pack buffer"
+        ):
+            item_indices = batch["item_indices"]
+            plans = batch["plans"]
+            stage_idx = 0
+            stage = plans[0]["stages"][stage_idx]
+            shard_group = stage["shard_group"]
+            group_size = get_pg_size(shard_group)
+            group_rank = torch.distributed.get_rank(shard_group)
+
+            expected_item_numels = [
+                plan["stages"][stage_idx]["rank_numels"][group_rank] for plan in plans
+            ]
+            expected_local_numel = sum(expected_item_numels)
+            local_buffer = self._get_fsdp_gather_scratch_tensor(
+                (
+                    "direct_pre_ns_batch_local_buffer",
+                    stage_idx,
+                    id(shard_group),
+                    batch["dtype"],
+                    batch["device"],
+                ),
+                expected_local_numel,
+                dtype=batch["dtype"],
+                device=batch["device"],
+            )
+            prewire_buffers: dict[torch.dtype, torch.Tensor] = {}
+
+            local_offset = 0
+            for batch_item_idx, (item_idx, expected_numel) in enumerate(
+                zip(item_indices, expected_item_numels)
+            ):
+                dtensor_ref, local_tensor_ref = items[item_idx]
+                if local_tensor_ref.numel() != expected_numel:
+                    raise AssertionError(
+                        "Direct Muon+M-FSDP boundary pre-NS gather item size mismatch: "
+                        f"item={batch_item_idx}, got={local_tensor_ref.numel()}, "
+                        f"expected={expected_numel}."
+                    )
+                update_idx = boundary_update_indices[item_idx]
+                p, _, update_mode, lr, group_kwargs = all_updates[update_idx]
+                if p is not dtensor_ref:
+                    raise AssertionError(
+                        "Direct Muon+M-FSDP boundary pre-NS gather item/update mismatch."
+                    )
+                target_flat = local_buffer[local_offset : local_offset + expected_numel]
+                mom_local = self.state[p]["momentum_buffer"]._local_tensor
+                if expected_numel == 0:
+                    ref_dtype = mom_local.dtype
+                    ref_device = mom_local.device
+                elif target_flat.dtype == mom_local.dtype:
+                    target = target_flat.view(mom_local.shape)
+                    self._compute_local_pre_ns_grad(p, group_kwargs, lr, out=target)
+                    ref_dtype = target.dtype
+                    ref_device = target.device
+                else:
+                    prewire_buffer = prewire_buffers.get(mom_local.dtype)
+                    if prewire_buffer is None:
+                        prewire_buffer = self._get_fsdp_gather_scratch_tensor(
+                            (
+                                "direct_pre_ns_batch_prewire_buffer",
+                                stage_idx,
+                                id(shard_group),
+                                mom_local.dtype,
+                                batch["device"],
+                            ),
+                            expected_local_numel,
+                            dtype=mom_local.dtype,
+                            device=batch["device"],
+                        )
+                        prewire_buffers[mom_local.dtype] = prewire_buffer
+                    prewire_flat = prewire_buffer[local_offset : local_offset + expected_numel]
+                    prewire = prewire_flat.view(mom_local.shape)
+                    self._compute_local_pre_ns_grad(p, group_kwargs, lr, out=prewire)
+                    target_flat.copy_(prewire_flat)
+                    ref_dtype = prewire.dtype
+                    ref_device = prewire.device
+                # The packed scratch view can be reused before the completed
+                # boundary update is processed.  Keep only a tiny dtype/device
+                # reference for restoring the gathered wire dtype before exact NS.
+                pre_ns_ref = torch.empty(0, dtype=ref_dtype, device=ref_device)
+                all_updates[update_idx] = (p, pre_ns_ref, update_mode, lr, group_kwargs)
+                local_offset += expected_numel
+
+            if local_offset != expected_local_numel:
+                raise AssertionError(
+                    "Direct Muon+M-FSDP boundary pre-NS gather local buffer size mismatch: "
+                    f"packed={local_offset}, expected={expected_local_numel}."
+                )
+
+            rank_offsets: list[list[int]] = []
+            rank_total_numels: list[int] = []
+            for rank in range(group_size):
+                offsets = []
+                total_numel = 0
+                for plan in plans:
+                    offsets.append(total_numel)
+                    total_numel += plan["stages"][stage_idx]["rank_numels"][rank]
+                rank_offsets.append(offsets)
+                rank_total_numels.append(total_numel)
+
+            use_padded_all_gather = self._batch_uses_padded_all_gather(rank_total_numels)
+        return {
+            "batch": batch,
+            "plans": plans,
+            "stage_idx": stage_idx,
+            "shard_group": shard_group,
+            "group_size": group_size,
+            "rank_offsets": rank_offsets,
+            "rank_total_numels": rank_total_numels,
+            "local_buffer": local_buffer,
+            "use_padded_all_gather": use_padded_all_gather,
+        }
+
     def _start_gather_full_uneven_local_tensor_batch_async(
-        self, items: list[tuple[torch.Tensor, torch.Tensor]], batch: dict[str, Any]
+        self,
+        items: list[tuple[torch.Tensor, torch.Tensor]],
+        batch: dict[str, Any],
+        *,
+        all_updates: list | None = None,
+        boundary_update_indices: list[int] | None = None,
     ) -> dict[str, Any]:
         with self._with_fsdp_gather_scratch_scope(batch.get("_scratch_scope")):
+            direct_pre_ns = all_updates is not None
+            if direct_pre_ns and boundary_update_indices is None:
+                raise AssertionError(
+                    "Direct Muon+M-FSDP boundary pre-NS gather requires boundary update indices."
+                )
             if batch.get("is_flat", False):
+                if direct_pre_ns:
+                    raise AssertionError(
+                        "Direct Muon+M-FSDP boundary pre-NS gather-buffer path "
+                        "does not yet support flat gather batches."
+                    )
                 with torch.autograd.profiler.record_function("Muon-FSDP flat gather pack"):
                     stage_state = self._prepare_flat_uneven_gather_batch(items, batch)
                 pending_stage = self._start_uneven_gather_stage(stage_state, async_op=True)
@@ -5025,9 +5226,14 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                                     )
                                 )
                             else:
-                                stage_state = self._prepare_uneven_gather_stage(
-                                    current_buffers, plans, batch, stage_idx, stage
-                                )
+                                if direct_pre_ns and stage_idx == 0:
+                                    stage_state = self._prepare_uneven_gather_stage_direct_pre_ns(
+                                        items, batch, all_updates, boundary_update_indices
+                                    )
+                                else:
+                                    stage_state = self._prepare_uneven_gather_stage(
+                                        current_buffers, plans, batch, stage_idx, stage
+                                    )
                             pending_stage = self._issue_uneven_gather_stage(
                                 stage_state, async_op=True, comm_stream=comm_stream
                             )
@@ -5035,6 +5241,12 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                                 pending_stages.append(pending_stage)
                                 break
                             if not self._block_current_stream_on_uneven_gather_stage(pending_stage):
+                                if direct_pre_ns:
+                                    raise AssertionError(
+                                        "Direct Muon+M-FSDP boundary pre-NS gather-buffer path "
+                                        "requires torch.distributed.Work.block_current_stream() "
+                                        "for async multi-stage gathers."
+                                    )
                                 if stage_idx == 0:
                                     return {
                                         "items": items,
@@ -5057,9 +5269,14 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                     "final_pending_stage": pending_stages[-1],
                 }
 
-            stage_state = self._prepare_uneven_gather_stage(
-                current_buffers, plans, batch, 0, plans[0]["stages"][0]
-            )
+            if direct_pre_ns:
+                stage_state = self._prepare_uneven_gather_stage_direct_pre_ns(
+                    items, batch, all_updates, boundary_update_indices
+                )
+            else:
+                stage_state = self._prepare_uneven_gather_stage(
+                    current_buffers, plans, batch, 0, plans[0]["stages"][0]
+                )
             pending_stage = self._start_uneven_gather_stage(stage_state, async_op=True)
             return {"items": items, "batch": batch, "pending_stage": pending_stage}
 

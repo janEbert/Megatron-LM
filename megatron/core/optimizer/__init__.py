@@ -761,6 +761,9 @@ def _get_muon_fsdp_kwargs(config: OptimizerConfig) -> dict[str, Any]:
         "fsdp_fused_async_gather_repack": getattr(
             config, "muon_fsdp_fused_async_gather_repack", False
         ),
+        "fsdp_boundary_pre_ns_into_gather_buffer": getattr(
+            config, "muon_fsdp_boundary_pre_ns_into_gather_buffer", False
+        ),
         "fsdp_boundary_batch_sort_by_size": getattr(
             config, "muon_fsdp_boundary_batch_sort_by_size", False
         ),

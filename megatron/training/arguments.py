@@ -2428,6 +2428,15 @@ def _add_regularization_args(parser):
                        'stage send buffer instead of materializing per-item intermediate '
                        'buffers. Preserves collective order and optimizer math. '
                        'Defaults to false.')
+    group.add_argument('--muon-fsdp-boundary-pre-ns-into-gather-buffer',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='For exact overlapped Muon+M-FSDP gather-mode boundary '
+                       'updates, compute pre-Newton-Schulz tensors directly into '
+                       'the stage-0 gather send buffer when the wire dtype matches '
+                       'the local momentum dtype. This preserves optimizer math and '
+                       'removes per-item pre-NS materialization plus the stage-0 '
+                       'pack copy for eligible gathers. Defaults to false.')
     group.add_argument('--muon-fsdp-boundary-batch-sort-by-size',
                        action=argparse.BooleanOptionalAction,
                        default=False,
