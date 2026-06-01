@@ -432,6 +432,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         dp_group: torch.distributed.ProcessGroup | None = None,
         fsdp_batched_all_gather: bool = False,
         fsdp_flat_batched_all_gather: bool = False,
+        fsdp_flat_batched_all_gather_nonempty_group: bool = False,
         fsdp_reuse_gather_scratch: bool = False,
         fsdp_padded_all_gather: bool = False,
         fsdp_padded_all_gather_pad_factor: float = 1.25,
@@ -474,6 +475,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.dp_group = dp_group
         self.fsdp_batched_all_gather = fsdp_batched_all_gather
         self.fsdp_flat_batched_all_gather = fsdp_flat_batched_all_gather
+        self.fsdp_flat_batched_all_gather_nonempty_group = (
+            fsdp_flat_batched_all_gather_nonempty_group
+        )
         self.fsdp_reuse_gather_scratch = fsdp_reuse_gather_scratch
         self.fsdp_padded_all_gather = fsdp_padded_all_gather
         self.fsdp_padded_all_gather_pad_factor = fsdp_padded_all_gather_pad_factor
@@ -531,6 +535,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             tuple[int, tuple[int, ...]], dict[str, Any] | None
         ] = {}
         self._flat_uneven_gather_plan_cache: dict[tuple[int, int], dict[str, Any] | None] = {}
+        self._flat_nonempty_group_cache: dict[tuple[int, ...], Any] = {}
         self._fsdp_nonempty_group_cache: dict[tuple[int, ...], Any] = {}
         self._fsdp_gather_scratch_cache: dict[tuple[Any, ...], Any] = {}
         self._fsdp_gather_scratch_scope: Any = None
@@ -704,7 +709,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             element_size = torch.empty((), dtype=batch["dtype"]).element_size()
 
         if batch.get("is_flat", False):
-            rank_total_numels = batch["flat_rank_total_numels"]
+            rank_total_numels = batch.get(
+                "flat_collective_rank_total_numels", batch["flat_rank_total_numels"]
+            )
             gather_bytes = self._rank_batch_gather_bytes(
                 rank_total_numels,
                 element_size=element_size,
@@ -769,7 +776,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             if element_size is None:
                 element_size = torch.empty((), dtype=batch["dtype"]).element_size()
             if batch.get("is_flat", False):
-                rank_total_numels = batch["flat_rank_total_numels"]
+                rank_total_numels = batch.get(
+                    "flat_collective_rank_total_numels", batch["flat_rank_total_numels"]
+                )
                 use_padded = self._batch_uses_padded_all_gather(rank_total_numels)
                 gather_bytes = self._rank_batch_gather_bytes(
                     rank_total_numels, element_size=element_size, use_padded=use_padded
@@ -825,6 +834,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"boundary_gather_dtype={self.fsdp_boundary_gather_dtype}, "
             f"wire_element_size={wire_element_size}, "
             f"flat={self.fsdp_flat_batched_all_gather}, "
+            f"flat_nonempty_group={self.fsdp_flat_batched_all_gather_nonempty_group}, "
             f"fused_async_repack={self.fsdp_fused_async_gather_repack}, "
             f"batch_sort_by_size={self.fsdp_boundary_batch_sort_by_size}, "
             f"overlap={self.fsdp_overlap_comm_compute}, "
@@ -845,14 +855,24 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         batch = stage_state["batch"]
         kind = "flat" if batch.get("is_flat", False) else f"stage{stage_state['stage_idx']}"
         mode = "padded" if stage_state["use_padded_all_gather"] else "uneven"
+        rank_total_numels = stage_state.get(
+            "collective_rank_total_numels", stage_state["rank_total_numels"]
+        )
         gather_bytes = self._rank_batch_gather_bytes(
-            stage_state["rank_total_numels"],
+            rank_total_numels,
             element_size=stage_state["local_buffer"].element_size(),
             use_padded=stage_state["use_padded_all_gather"],
         )
+        active_text = ""
+        if "collective_rank_indices" in stage_state:
+            active_text = (
+                f" active={len(stage_state['collective_rank_indices'])}/"
+                f"{stage_state['group_size']}"
+            )
         return (
             f"Muon-FSDP gather collective launch {kind} {mode} "
-            f"items={len(batch['item_indices'])} MiB={gather_bytes / (1024 ** 2):.1f}"
+            f"items={len(batch['item_indices'])}{active_text} "
+            f"MiB={gather_bytes / (1024 ** 2):.1f}"
         )
 
     def _maybe_log_fsdp_update_mode_summary(self, all_updates: list) -> None:
@@ -1158,6 +1178,42 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             if self._process_group_size_if_member(flat_group) == product_size:
                 return flat_group
         return None
+
+    def _get_flat_nonempty_gather_group(
+        self, flat_group: torch.distributed.ProcessGroup, active_rank_indices: tuple[int, ...]
+    ) -> torch.distributed.ProcessGroup | None:
+        """Return a cached subgroup containing only active flat-gather ranks.
+
+        All ranks enter the WORLD all-gather and create the same sorted set of
+        requested subgroups. This avoids rank-divergent NCCL communicator
+        creation when different HSDP replicas need different active spans.
+        """
+        flat_group_size = get_pg_size(flat_group)
+        group_ranks = tuple(torch.distributed.get_process_group_ranks(flat_group))
+        if len(active_rank_indices) == flat_group_size:
+            local_request: tuple[int, ...] = ()
+        elif active_rank_indices:
+            local_request = tuple(group_ranks[rank] for rank in active_rank_indices)
+        else:
+            local_request = ()
+
+        world_size = torch.distributed.get_world_size()
+        requests: list[tuple[int, ...] | None] = [None] * world_size
+        torch.distributed.all_gather_object(
+            requests, local_request, group=torch.distributed.group.WORLD
+        )
+        for requested_ranks in sorted({request for request in requests if request}):
+            if requested_ranks not in self._flat_nonempty_group_cache:
+                self._flat_nonempty_group_cache[requested_ranks] = torch.distributed.new_group(
+                    ranks=list(requested_ranks)
+                )
+
+        if len(active_rank_indices) == flat_group_size:
+            return flat_group
+        if not active_rank_indices:
+            return None
+
+        return self._flat_nonempty_group_cache[local_request]
 
     def _get_dtensor_mesh_dims_group(
         self, dtensor_ref, mesh_dims: tuple[int, ...]
@@ -3106,11 +3162,23 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             range(flat_group_size), key=lambda rank: _chunk_flat_start(flat_chunk_infos[rank])
         )
         flat_sorted_chunk_infos = [flat_chunk_infos[rank] for rank in flat_sorted_rank_indices]
+        active_rank_indices = tuple(
+            rank for rank, rank_numel in enumerate(flat_rank_numels) if rank_numel > 0
+        )
+        active_group = flat_group
+        if self.fsdp_flat_batched_all_gather_nonempty_group:
+            active_group = self._get_flat_nonempty_gather_group(flat_group, active_rank_indices)
+            if active_group is None:
+                self._flat_uneven_gather_plan_cache[cache_key] = None
+                return None
         flat_plan = {
             "flat_group": flat_group,
+            "flat_active_group": active_group,
             "flat_group_size": flat_group_size,
             "flat_group_rank": torch.distributed.get_rank(flat_group),
             "flat_rank_numels": flat_rank_numels,
+            "flat_active_rank_indices": active_rank_indices,
+            "flat_active_rank_numels": [flat_rank_numels[rank] for rank in active_rank_indices],
             "flat_chunk_infos": flat_chunk_infos,
             "flat_sorted_rank_indices": flat_sorted_rank_indices,
             "flat_sorted_is_contiguous_full_order": _chunk_infos_are_contiguous_full_order(
@@ -3502,14 +3570,38 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self, pending_stage: dict[str, Any]
     ) -> list[torch.Tensor]:
         group_size = pending_stage["group_size"]
+        if pending_stage.get("skipped_nonempty_collective", False):
+            local_buffer = pending_stage["local_buffer"]
+            return [
+                torch.empty(0, dtype=local_buffer.dtype, device=local_buffer.device)
+                for _ in range(group_size)
+            ]
+
         if pending_stage["use_padded_all_gather"]:
             gathered_padded_buffer = pending_stage["gathered_padded_buffer"]
             max_rank_numel = pending_stage["max_rank_numel"]
-            return [
+            collective_rank_indices = pending_stage.get(
+                "collective_rank_indices", range(group_size)
+            )
+            rank_buffers = [
                 gathered_padded_buffer[rank * max_rank_numel : (rank + 1) * max_rank_numel]
-                for rank in range(group_size)
+                for rank in range(len(collective_rank_indices))
             ]
-        return pending_stage["group_tensors"]
+        else:
+            rank_buffers = pending_stage["group_tensors"]
+
+        collective_rank_indices = pending_stage.get("collective_rank_indices")
+        if collective_rank_indices is None:
+            return rank_buffers
+
+        local_buffer = pending_stage["local_buffer"]
+        full_rank_buffers = [
+            torch.empty(0, dtype=local_buffer.dtype, device=local_buffer.device)
+            for _ in range(group_size)
+        ]
+        for collective_rank, original_rank in enumerate(collective_rank_indices):
+            full_rank_buffers[original_rank] = rank_buffers[collective_rank]
+        return full_rank_buffers
 
     def _reconstruct_full_tensor_from_rank_buffers(
         self,
@@ -3885,7 +3977,20 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             if flat_plan is None:
                 continue
 
-            key = (id(flat_plan["flat_group"]), local_tensor.dtype, local_tensor.device)
+            if self.fsdp_flat_batched_all_gather_nonempty_group:
+                collective_group = flat_plan["flat_active_group"]
+                collective_rank_numels = flat_plan["flat_active_rank_numels"]
+                active_rank_indices = flat_plan["flat_active_rank_indices"]
+            else:
+                collective_group = flat_plan["flat_group"]
+                collective_rank_numels = flat_plan["flat_rank_numels"]
+                active_rank_indices = tuple(range(flat_plan["flat_group_size"]))
+            key = (
+                id(collective_group),
+                active_rank_indices,
+                local_tensor.dtype,
+                local_tensor.device,
+            )
             key_batches = batches.setdefault(key, [])
             element_size = self._boundary_gather_wire_element_size(local_tensor.dtype)
             if not key_batches:
@@ -3899,13 +4004,15 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         "plans": [],
                         "flat_plans": [],
                         "flat_rank_total_numels": [0] * flat_plan["flat_group_size"],
+                        "flat_collective_rank_indices": active_rank_indices,
+                        "flat_collective_rank_total_numels": [0] * len(active_rank_indices),
                     }
                 )
             batch = key_batches[-1]
             if batch["item_indices"]:
                 candidate_bytes = self._candidate_rank_batch_gather_bytes(
-                    batch["flat_rank_total_numels"],
-                    flat_plan["flat_rank_numels"],
+                    batch["flat_collective_rank_total_numels"],
+                    collective_rank_numels,
                     element_size=element_size,
                 )
                 if candidate_bytes > self.fsdp_batch_max_gather_bytes:
@@ -3918,6 +4025,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         "plans": [],
                         "flat_plans": [],
                         "flat_rank_total_numels": [0] * flat_plan["flat_group_size"],
+                        "flat_collective_rank_indices": active_rank_indices,
+                        "flat_collective_rank_total_numels": [0] * len(active_rank_indices),
                     }
                     key_batches.append(batch)
 
@@ -3926,6 +4035,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             batch["flat_plans"].append(flat_plan)
             for rank, rank_numel in enumerate(flat_plan["flat_rank_numels"]):
                 batch["flat_rank_total_numels"][rank] += rank_numel
+            for rank, rank_numel in enumerate(collective_rank_numels):
+                batch["flat_collective_rank_total_numels"][rank] += rank_numel
             skip_item_indices.add(item_idx)
 
         for key_batches in batches.values():
@@ -4001,8 +4112,17 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         item_indices = batch["item_indices"]
         flat_plans = batch["flat_plans"]
         flat_group = flat_plans[0]["flat_group"]
-        group_size = get_pg_size(flat_group)
-        group_rank = torch.distributed.get_rank(flat_group)
+        group_size = flat_plans[0]["flat_group_size"]
+        group_rank = flat_plans[0]["flat_group_rank"]
+        collective_rank_indices = batch.get(
+            "flat_collective_rank_indices", tuple(range(group_size))
+        )
+        collective_group = (
+            flat_plans[0]["flat_active_group"]
+            if self.fsdp_flat_batched_all_gather_nonempty_group
+            else flat_group
+        )
+        participates = group_rank in collective_rank_indices
 
         expected_item_numels = [
             flat_plan["flat_rank_numels"][group_rank] for flat_plan in flat_plans
@@ -4071,17 +4191,23 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 "Flat batched uneven DTensor gather rank totals changed after batching."
             )
 
-        use_padded_all_gather = self._batch_uses_padded_all_gather(rank_total_numels)
+        collective_rank_total_numels = batch.get(
+            "flat_collective_rank_total_numels", rank_total_numels
+        )
+        use_padded_all_gather = self._batch_uses_padded_all_gather(collective_rank_total_numels)
         return {
             "batch": batch,
             "plans": batch["plans"],
             "flat_plans": flat_plans,
             "stage_idx": 0,
-            "shard_group": flat_group,
+            "shard_group": collective_group,
             "group_size": group_size,
             "rank_offsets": rank_offsets,
             "rank_total_numels": rank_total_numels,
+            "collective_rank_indices": collective_rank_indices,
+            "collective_rank_total_numels": collective_rank_total_numels,
             "local_buffer": local_buffer,
+            "participates": participates,
             "use_padded_all_gather": use_padded_all_gather,
         }
 
@@ -4392,9 +4518,15 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         batch = stage_state["batch"]
         shard_group = stage_state["shard_group"]
         local_buffer = stage_state["local_buffer"]
-        rank_total_numels = stage_state["rank_total_numels"]
+        rank_total_numels = stage_state.get(
+            "collective_rank_total_numels", stage_state["rank_total_numels"]
+        )
         pending = dict(stage_state)
         pending["comm_stream"] = comm_stream
+        if not stage_state.get("participates", True):
+            pending["work"] = None
+            pending["skipped_nonempty_collective"] = True
+            return pending
 
         with torch.autograd.profiler.record_function(
             self._gather_collective_nvtx_label(stage_state)

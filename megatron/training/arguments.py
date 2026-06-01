@@ -2390,6 +2390,13 @@ def _add_regularization_args(parser):
                        'for eligible multi-stage shard layouts. Requires batched '
                        'all-gather and falls back to the staged path when ineligible. '
                        'Defaults to false.')
+    group.add_argument('--muon-fsdp-flat-batched-all-gather-nonempty-group',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='For eligible flattened Muon+M-FSDP boundary gathers, use '
+                       'a subgroup containing only ranks with nonempty flat chunks. '
+                       'Requires flat batched all-gather and preserves exact gathered '
+                       'values for ranks that own local shards. Defaults to false.')
     group.add_argument('--muon-fsdp-reuse-gather-scratch',
                        action=argparse.BooleanOptionalAction,
                        default=False,

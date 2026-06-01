@@ -917,6 +917,64 @@ class TestFSDPTensorParallelMuon:
         else:
             assert torch.equal(result, expected)
 
+    @pytest.mark.skipif(
+        WORLD_SIZE < 4, reason="HFSDP flat nonempty-group gather test requires at least 4 ranks"
+    )
+    def test_hfsdp_flat_batched_gather_can_use_nonempty_group(self):
+        from torch.distributed.device_mesh import init_device_mesh
+
+        dp_size = torch.distributed.get_world_size()
+        outer_size = 2
+        inner_size = dp_size // outer_size
+        if dp_size % outer_size != 0:
+            pytest.skip("HFSDP flat gather test requires an even world size")
+
+        device_mesh = init_device_mesh(
+            "cuda", (outer_size, inner_size), mesh_dim_names=("dp_outer", "dp")
+        )
+        outer_rank, inner_rank = device_mesh.get_coordinate()
+        logical_rank = inner_rank * outer_size + outer_rank
+        rows, cols = max(2, dp_size // 2), 4
+        full_update = torch.arange(rows * cols, device="cuda", dtype=torch.float32).view(rows, cols)
+        rows_per_logical_rank = [1 if rank < rows else 0 for rank in range(dp_size)]
+        row_start = sum(rows_per_logical_rank[:logical_rank])
+        row_count = rows_per_logical_rank[logical_rank]
+        local_update = full_update[row_start : row_start + row_count].contiguous()
+
+        param = nn.Parameter(
+            _make_hfsdp_dtensor(local_update.clone(), full_update.shape, device_mesh)
+        )
+        optimizer = _make_fsdp_muon(
+            [param],
+            dp_group=torch.distributed.group.WORLD,
+            fsdp_batched_all_gather=True,
+            fsdp_flat_batched_all_gather=True,
+            fsdp_flat_batched_all_gather_nonempty_group=True,
+        )
+
+        active_counts = []
+        real_issue_stage = optimizer._issue_uneven_gather_stage
+
+        def recording_issue_stage(stage_state, *args, **kwargs):
+            active_counts.append(len(stage_state.get("collective_rank_indices", ())))
+            return real_issue_stage(stage_state, *args, **kwargs)
+
+        def fail_staged_batch(*_args, **_kwargs):
+            raise AssertionError("eligible HFSDP flat gather should not use staged batches")
+
+        with (
+            patch.object(optimizer, "_issue_uneven_gather_stage", recording_issue_stage),
+            patch.object(optimizer, "_gather_full_uneven_local_tensor_batch", fail_staged_batch),
+        ):
+            result = optimizer._gather_full_uneven_local_tensors_like([(param, local_update)])[0]
+
+        assert active_counts == [rows]
+        assert rows < dp_size
+        if local_update.numel() == 0:
+            assert result is None
+        else:
+            torch.testing.assert_close(result, full_update, atol=0, rtol=0)
+
     @pytest.mark.skipif(WORLD_SIZE < 4, reason="HFSDP flat budget test requires at least 4 ranks")
     def test_hfsdp_flat_batched_gather_splits_on_gather_byte_budget(self):
         from torch.distributed.device_mesh import init_device_mesh
@@ -1995,6 +2053,7 @@ class TestFSDPFactoryIntegration:
 
         assert not config.muon_fsdp_batched_all_gather
         assert not config.muon_fsdp_flat_batched_all_gather
+        assert not config.muon_fsdp_flat_batched_all_gather_nonempty_group
         assert not config.muon_fsdp_reuse_gather_scratch
         assert not config.muon_fsdp_padded_all_gather
         assert config.muon_fsdp_padded_all_gather_pad_factor == 1.25
@@ -2048,6 +2107,7 @@ class TestFSDPFactoryIntegration:
             muon_extra_scale_factor=1.0,
             muon_fsdp_batched_all_gather=True,
             muon_fsdp_flat_batched_all_gather=True,
+            muon_fsdp_flat_batched_all_gather_nonempty_group=True,
             muon_fsdp_reuse_gather_scratch=True,
             muon_fsdp_padded_all_gather=True,
             muon_fsdp_padded_all_gather_pad_factor=2.0,
@@ -2097,6 +2157,7 @@ class TestFSDPFactoryIntegration:
             assert base_opt.dp_group is not None
             assert base_opt.fsdp_batched_all_gather
             assert base_opt.fsdp_flat_batched_all_gather
+            assert base_opt.fsdp_flat_batched_all_gather_nonempty_group
             assert base_opt.fsdp_reuse_gather_scratch
             assert base_opt.fsdp_padded_all_gather
             assert base_opt.fsdp_padded_all_gather_pad_factor == 2.0
