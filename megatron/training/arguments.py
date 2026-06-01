@@ -2552,6 +2552,14 @@ def _add_regularization_args(parser):
                        'enabled, compute local norms with torch foreach norm when '
                        'available. This preserves the scaling formula while reducing '
                        'per-parameter reduction launch overhead. Defaults to false.')
+    group.add_argument('--muon-fsdp-approx-local-boundary-flat-norm-all-reduce',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='When approximate local-boundary global-norm scaling is '
+                       'enabled, reduce norm sums with one equivalent flat FSDP '
+                       'all-reduce when the DTensor plan exposes a flat shard group. '
+                       'This preserves the norm-ratio formula up to FP32 reduction '
+                       'order. Defaults to false.')
     group.add_argument('--muon-fsdp-overlap-local-ns-first',
                        action=argparse.BooleanOptionalAction,
                        default=False,

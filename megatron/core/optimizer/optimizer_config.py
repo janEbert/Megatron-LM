@@ -462,6 +462,12 @@ class OptimizerConfig:
     reducing per-parameter reduction launch overhead.
     """
 
+    muon_fsdp_approx_local_boundary_flat_norm_all_reduce: bool = False
+    """If True, compute approximate local-boundary global-norm sums with one
+    equivalent flat FSDP all-reduce when the DTensor plan exposes a flat shard
+    group. This preserves the norm-ratio formula up to FP32 reduction order.
+    """
+
     muon_fsdp_overlap_local_ns_first: bool = False
     """If True, prioritize fully local Newton-Schulz/update work before distributed
     Newton-Schulz work while overlapped boundary all-gathers are pending.

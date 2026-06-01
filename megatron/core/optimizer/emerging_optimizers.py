@@ -457,6 +457,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_approx_local_boundary_max_local_numel: int = 0,
         fsdp_approx_local_boundary_global_norm_scale: bool = False,
         fsdp_approx_local_boundary_foreach_norm: bool = False,
+        fsdp_approx_local_boundary_flat_norm_all_reduce: bool = False,
         fsdp_overlap_local_ns_first: bool = False,
         fsdp_overlap_comm_compute: bool = False,
         fsdp_overlap_boundary_ready_event: bool = False,
@@ -528,6 +529,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             fsdp_approx_local_boundary_global_norm_scale
         )
         self.fsdp_approx_local_boundary_foreach_norm = fsdp_approx_local_boundary_foreach_norm
+        self.fsdp_approx_local_boundary_flat_norm_all_reduce = (
+            fsdp_approx_local_boundary_flat_norm_all_reduce
+        )
         self.fsdp_overlap_local_ns_first = fsdp_overlap_local_ns_first
         self.fsdp_overlap_comm_compute = fsdp_overlap_comm_compute
         self.fsdp_overlap_boundary_ready_event = fsdp_overlap_boundary_ready_event
@@ -1011,6 +1015,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"{self.fsdp_approx_local_boundary_global_norm_scale}, "
             "approx_local_boundary_foreach_norm="
             f"{self.fsdp_approx_local_boundary_foreach_norm}, "
+            "approx_local_boundary_flat_norm_all_reduce="
+            f"{self.fsdp_approx_local_boundary_flat_norm_all_reduce}, "
             f"distributed_ns_small_col_dim={self.fsdp_distributed_ns_small_col_dim}, "
             f"distributed_ns_min_numel={self.fsdp_distributed_ns_min_numel}, "
             f"partial_distributed_candidates={partial_distributed_candidate_count} "
@@ -2223,9 +2229,40 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 "Muon-FSDP approx boundary global norm all-reduce "
                 f"stages={max_stage_count} count={len(entries)}"
             ):
+                remaining_entry_indices = set(range(len(entries)))
+                if self.fsdp_approx_local_boundary_flat_norm_all_reduce:
+                    flat_groups: dict[int, tuple[torch.distributed.ProcessGroup, list[int]]] = {}
+                    for entry_idx, (p, _, plan) in enumerate(entries):
+                        if plan is None:
+                            remaining_entry_indices.discard(entry_idx)
+                            continue
+                        flat_group = self._get_existing_flat_uneven_gather_group(p, plan)
+                        if flat_group is None or get_pg_size(flat_group) <= 1:
+                            continue
+                        group_id = id(flat_group)
+                        if group_id not in flat_groups:
+                            flat_groups[group_id] = (flat_group, [])
+                        flat_groups[group_id][1].append(entry_idx)
+                        remaining_entry_indices.discard(entry_idx)
+
+                    if flat_groups:
+                        flat_count = sum(len(indices) for _, indices in flat_groups.values())
+                        with torch.autograd.profiler.record_function(
+                            "Muon-FSDP approx boundary global norm flat all-reduce "
+                            f"groups={len(flat_groups)} count={flat_count}"
+                        ):
+                            for shard_group, entry_indices in flat_groups.values():
+                                group_sqs = global_sqs[entry_indices].contiguous()
+                                torch.distributed.all_reduce(
+                                    group_sqs, op=torch.distributed.ReduceOp.SUM, group=shard_group
+                                )
+                                global_sqs[entry_indices] = group_sqs
+
                 for stage_idx in range(max_stage_count):
                     stage_groups: dict[int, tuple[torch.distributed.ProcessGroup, list[int]]] = {}
                     for entry_idx, (_, _, plan) in enumerate(entries):
+                        if entry_idx not in remaining_entry_indices:
+                            continue
                         if plan is None:
                             continue
                         if stage_idx >= len(plan["stages"]):
