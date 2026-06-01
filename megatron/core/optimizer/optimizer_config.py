@@ -431,6 +431,12 @@ class OptimizerConfig:
     this many elements; larger local boundary shards keep the exact gather path.
     """
 
+    muon_fsdp_approx_local_boundary_global_norm_scale: bool = False
+    """If True with approximate local boundary updates, scale each local boundary
+    update by the local/global pre-Newton-Schulz Frobenius norm ratio. This keeps
+    the block-local approximation but avoids local-only norm amplification.
+    """
+
     muon_fsdp_overlap_local_ns_first: bool = False
     """If True, prioritize fully local Newton-Schulz/update work before distributed
     Newton-Schulz work while overlapped boundary all-gathers are pending.
