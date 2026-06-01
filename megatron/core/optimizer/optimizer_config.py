@@ -325,6 +325,12 @@ class OptimizerConfig:
     optimizer math while avoiding per-item intermediate unpack buffers.
     """
 
+    muon_fsdp_boundary_batch_sort_by_size: bool = False
+    """If True, deterministically launch larger Muon+M-FSDP boundary gather batches first within
+    each identical communicator/stage group. This preserves per-communicator collective order and
+    only changes scheduling.
+    """
+
     muon_fsdp_fast_reconstruct: bool = True
     """If True, view contiguous gathered Muon+M-FSDP buffers without an additional reconstruction
     copy.

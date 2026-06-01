@@ -438,6 +438,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_batch_max_gather_bytes: int = 1024 * 1024 * 1024,
         fsdp_padded_all_gather_zero_pad: bool = True,
         fsdp_fused_async_gather_repack: bool = False,
+        fsdp_boundary_batch_sort_by_size: bool = False,
         fsdp_fast_reconstruct: bool = True,
         fsdp_boundary_gather_dtype: str = "fp32",
         fsdp_distributed_ns: bool = False,
@@ -478,6 +479,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.fsdp_batch_max_gather_bytes = fsdp_batch_max_gather_bytes
         self.fsdp_padded_all_gather_zero_pad = fsdp_padded_all_gather_zero_pad
         self.fsdp_fused_async_gather_repack = fsdp_fused_async_gather_repack
+        self.fsdp_boundary_batch_sort_by_size = fsdp_boundary_batch_sort_by_size
         self.fsdp_fast_reconstruct = fsdp_fast_reconstruct
         supported_boundary_gather_dtypes = ("fp32", "bf16", "int8", "fp8_e4m3fn", "fp8_e5m2")
         if fsdp_boundary_gather_dtype not in supported_boundary_gather_dtypes:
@@ -693,6 +695,39 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             gathered_numel = sum(rank_total_numels)
         return gathered_numel * element_size
 
+    def _planned_gather_batch_bytes(self, batch: dict[str, Any]) -> tuple[int, int]:
+        element_size = batch.get("element_size")
+        if element_size is None:
+            element_size = torch.empty((), dtype=batch["dtype"]).element_size()
+
+        if batch.get("is_flat", False):
+            rank_total_numels = batch["flat_rank_total_numels"]
+            gather_bytes = self._rank_batch_gather_bytes(
+                rank_total_numels,
+                element_size=element_size,
+                use_padded=self._batch_uses_padded_all_gather(rank_total_numels),
+            )
+            return gather_bytes, gather_bytes
+
+        max_gather_bytes = 0
+        total_gather_bytes = 0
+        for rank_total_numels in batch["stage_rank_total_numels"]:
+            gather_bytes = self._rank_batch_gather_bytes(
+                rank_total_numels,
+                element_size=element_size,
+                use_padded=self._batch_uses_padded_all_gather(rank_total_numels),
+            )
+            max_gather_bytes = max(max_gather_bytes, gather_bytes)
+            total_gather_bytes += gather_bytes
+        return max_gather_bytes, total_gather_bytes
+
+    def _sort_gather_batches_by_size(self, key_batches: list[dict[str, Any]]) -> None:
+        if not self.fsdp_boundary_batch_sort_by_size:
+            return
+        key_batches.sort(
+            key=lambda batch: tuple(-value for value in self._planned_gather_batch_bytes(batch))
+        )
+
     def _boundary_gather_wire_element_size(self, fallback_dtype: torch.dtype) -> int:
         if self.fsdp_boundary_gather_dtype in ("int8", "fp8_e4m3fn", "fp8_e5m2"):
             return 1
@@ -788,6 +823,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"wire_element_size={wire_element_size}, "
             f"flat={self.fsdp_flat_batched_all_gather}, "
             f"fused_async_repack={self.fsdp_fused_async_gather_repack}, "
+            f"batch_sort_by_size={self.fsdp_boundary_batch_sort_by_size}, "
             f"overlap={self.fsdp_overlap_comm_compute}, "
             f"overlap_local_ns_first={self.fsdp_overlap_local_ns_first}, "
             f"overlap_boundary_ready_event={self.fsdp_overlap_boundary_ready_event}, "
@@ -3755,6 +3791,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 for rank, rank_numel in enumerate(stage["rank_numels"]):
                     batch["stage_rank_total_numels"][stage_idx][rank] += rank_numel
 
+        for key_batches in batches.values():
+            self._sort_gather_batches_by_size(key_batches)
+
         return [batch for key_batches in batches.values() for batch in key_batches]
 
     def _build_flat_full_uneven_local_tensor_batches(
@@ -3815,6 +3854,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             for rank, rank_numel in enumerate(flat_plan["flat_rank_numels"]):
                 batch["flat_rank_total_numels"][rank] += rank_numel
             skip_item_indices.add(item_idx)
+
+        for key_batches in batches.values():
+            self._sort_gather_batches_by_size(key_batches)
 
         return [batch for key_batches in batches.values() for batch in key_batches]
 

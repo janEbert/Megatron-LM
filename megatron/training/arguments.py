@@ -2421,6 +2421,13 @@ def _add_regularization_args(parser):
                        'stage send buffer instead of materializing per-item intermediate '
                        'buffers. Preserves collective order and optimizer math. '
                        'Defaults to false.')
+    group.add_argument('--muon-fsdp-boundary-batch-sort-by-size',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='Launch larger Muon+M-FSDP boundary gather batches first '
+                       'within each identical communicator/stage group. This preserves '
+                       'per-communicator collective order and only changes scheduling. '
+                       'Defaults to false.')
     group.add_argument('--muon-fsdp-fast-reconstruct',
                        action=argparse.BooleanOptionalAction,
                        default=True,
