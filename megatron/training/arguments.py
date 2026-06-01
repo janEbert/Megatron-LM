@@ -2446,6 +2446,13 @@ def _add_regularization_args(parser):
                        default=False,
                        help='Do not run Muon+M-FSDP distributed Newton-Schulz while '
                        'overlapped boundary all-gathers are pending. Defaults to false.')
+    group.add_argument('--muon-fsdp-defer-partial-distributed-ns-under-gather',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='Defer only Muon+M-FSDP partial-distributed Newton-Schulz '
+                       'while overlapped boundary all-gathers are pending. Ordinary '
+                       'distributed Newton-Schulz still runs under the gather. '
+                       'Defaults to false.')
     group.add_argument('--muon-fsdp-overlap-local-ns-first',
                        action=argparse.BooleanOptionalAction,
                        default=False,

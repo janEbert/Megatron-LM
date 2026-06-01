@@ -442,6 +442,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_distributed_ns_exclude_qkv: bool = False,
         fsdp_partial_distributed_ns: bool = False,
         fsdp_defer_distributed_ns_under_gather: bool = False,
+        fsdp_defer_partial_distributed_ns_under_gather: bool = False,
         fsdp_overlap_local_ns_first: bool = False,
         fsdp_overlap_comm_compute: bool = False,
         fsdp_overlap_boundary_ready_event: bool = False,
@@ -486,6 +487,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.fsdp_distributed_ns_exclude_qkv = fsdp_distributed_ns_exclude_qkv
         self.fsdp_partial_distributed_ns = fsdp_partial_distributed_ns
         self.fsdp_defer_distributed_ns_under_gather = fsdp_defer_distributed_ns_under_gather
+        self.fsdp_defer_partial_distributed_ns_under_gather = (
+            fsdp_defer_partial_distributed_ns_under_gather
+        )
         self.fsdp_overlap_local_ns_first = fsdp_overlap_local_ns_first
         self.fsdp_overlap_comm_compute = fsdp_overlap_comm_compute
         self.fsdp_overlap_boundary_ready_event = fsdp_overlap_boundary_ready_event
@@ -882,6 +886,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"{self.fsdp_distributed_ns_gram_refresh_interval}, "
             f"distributed_ns_exclude_qkv={self.fsdp_distributed_ns_exclude_qkv}, "
             f"defer_distributed_ns_under_gather={self.fsdp_defer_distributed_ns_under_gather}, "
+            "defer_partial_distributed_ns_under_gather="
+            f"{self.fsdp_defer_partial_distributed_ns_under_gather}, "
             f"distributed_ns_small_col_dim={self.fsdp_distributed_ns_small_col_dim}, "
             f"distributed_ns_min_numel={self.fsdp_distributed_ns_min_numel}, "
             f"partial_distributed_candidates={partial_distributed_candidate_count} "
@@ -2199,7 +2205,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             if update_mode == "gather":
                 continue
             if update_mode in ("distributed", "partial_distributed"):
-                if self.fsdp_defer_distributed_ns_under_gather:
+                defer_update = self.fsdp_defer_distributed_ns_under_gather or (
+                    update_mode == "partial_distributed"
+                    and self.fsdp_defer_partial_distributed_ns_under_gather
+                )
+                if defer_update:
                     deferred_distributed_updates.append((idx, update))
                 else:
                     distributed_updates.append((idx, update))
