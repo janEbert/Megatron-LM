@@ -2228,16 +2228,14 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         with torch.autograd.profiler.record_function(
             f"Muon-FSDP approx boundary global norm begin count={len(entries)}"
         ):
-            with torch.autograd.profiler.record_function(
-                f"Muon-FSDP approx boundary global norm local-sq count={len(entries)}"
-            ):
-                local_sqs = compute_local_sqs()
-            global_sqs = local_sqs.clone()
             max_stage_count = max(
                 (len(plan["stages"]) for _, _, plan in entries if plan is not None), default=0
             )
+            local_sqs: torch.Tensor | None = None
+            global_sqs: torch.Tensor | None = None
 
             def launch_all_reduces() -> None:
+                assert global_sqs is not None
                 remaining_entry_indices = set(range(len(entries)))
                 if self.fsdp_approx_local_boundary_flat_norm_all_reduce:
                     flat_groups: dict[int, tuple[torch.distributed.ProcessGroup, list[int]]] = {}
@@ -2291,30 +2289,45 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         )
                         global_sqs[entry_indices] = group_sqs
 
-            done_event = None
-            with torch.autograd.profiler.record_function(
-                "Muon-FSDP approx boundary global norm all-reduce "
-                f"stages={max_stage_count} count={len(entries)}"
-            ):
-                if (
-                    self.fsdp_approx_local_boundary_async_norm_all_reduce
-                    and local_sqs.device.type == "cuda"
-                    and torch.cuda.is_available()
+            def compute_local_sqs_and_launch_reduces() -> None:
+                nonlocal local_sqs, global_sqs
+                with torch.autograd.profiler.record_function(
+                    f"Muon-FSDP approx boundary global norm local-sq count={len(entries)}"
                 ):
-                    device = local_sqs.device
-                    with torch.cuda.device(device):
-                        ready_event = torch.cuda.Event()
-                        current_stream = torch.cuda.current_stream(device)
-                        current_stream.record_event(ready_event)
-                        comm_stream = self._get_fsdp_comm_stream(device)
-                        global_sqs.record_stream(comm_stream)
-                        with torch.cuda.stream(comm_stream):
-                            comm_stream.wait_event(ready_event)
-                            launch_all_reduces()
-                            done_event = torch.cuda.Event()
-                            done_event.record(comm_stream)
-                else:
+                    local_sqs = compute_local_sqs()
+                global_sqs = local_sqs.clone()
+                with torch.autograd.profiler.record_function(
+                    "Muon-FSDP approx boundary global norm all-reduce "
+                    f"stages={max_stage_count} count={len(entries)}"
+                ):
                     launch_all_reduces()
+
+            done_event = None
+            first_device = entries[0][1].device
+            if (
+                self.fsdp_approx_local_boundary_async_norm_all_reduce
+                and first_device.type == "cuda"
+                and torch.cuda.is_available()
+            ):
+                with torch.cuda.device(first_device):
+                    ready_event = torch.cuda.Event()
+                    current_stream = torch.cuda.current_stream(first_device)
+                    current_stream.record_event(ready_event)
+                    comm_stream = self._get_fsdp_comm_stream(first_device)
+                    for _, pre_ns_grad, _ in entries:
+                        pre_ns_grad.record_stream(comm_stream)
+                    with torch.cuda.stream(comm_stream):
+                        comm_stream.wait_event(ready_event)
+                        compute_local_sqs_and_launch_reduces()
+                        assert local_sqs is not None and global_sqs is not None
+                        local_sqs.record_stream(comm_stream)
+                        global_sqs.record_stream(comm_stream)
+                        done_event = torch.cuda.Event()
+                        done_event.record(comm_stream)
+            else:
+                compute_local_sqs_and_launch_reduces()
+
+            assert local_sqs is not None and global_sqs is not None
 
             return {
                 "entries": entries,
