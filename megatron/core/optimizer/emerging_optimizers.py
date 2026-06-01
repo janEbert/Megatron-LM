@@ -2339,34 +2339,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return None
 
         def compute_local_sqs() -> torch.Tensor:
-            device = entries[0][1].device
-            nonempty_entries = [
-                (entry_idx, pre_ns_grad)
-                for entry_idx, (_, pre_ns_grad, _) in enumerate(entries)
-                if pre_ns_grad.numel() > 0
-            ]
-            if not nonempty_entries:
-                return torch.zeros(len(entries), dtype=torch.float32, device=device)
-
-            tensors = [pre_ns_grad for _, pre_ns_grad in nonempty_entries]
+            tensors = [pre_ns_grad for _, pre_ns_grad, _ in entries]
             if self.fsdp_approx_local_boundary_foreach_norm and hasattr(torch, "_foreach_norm"):
                 try:
                     norms = torch._foreach_norm(tensors, 2.0)
-                    nonempty_sqs = torch.stack(
-                        [norm.to(dtype=torch.float32).square() for norm in norms]
-                    )
-                    if len(nonempty_entries) == len(entries):
-                        return nonempty_sqs
-                    local_sqs = torch.zeros(
-                        len(entries), dtype=torch.float32, device=nonempty_sqs.device
-                    )
-                    nonempty_indices = torch.tensor(
-                        [entry_idx for entry_idx, _ in nonempty_entries],
-                        dtype=torch.long,
-                        device=nonempty_sqs.device,
-                    )
-                    local_sqs.index_copy_(0, nonempty_indices, nonempty_sqs)
-                    return local_sqs
+                    return torch.stack([norm.to(dtype=torch.float32).square() for norm in norms])
                 except RuntimeError as exc:
                     log_single_rank(
                         logger,
@@ -2374,19 +2351,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         "Falling back from Muon-FSDP foreach norm scale path: %s",
                         exc,
                     )
-            nonempty_sqs = torch.stack(
-                [pre_ns_grad.float().square().sum() for _, pre_ns_grad in nonempty_entries]
+            return torch.stack(
+                [pre_ns_grad.float().square().sum() for _, pre_ns_grad, _ in entries]
             )
-            if len(nonempty_entries) == len(entries):
-                return nonempty_sqs
-            local_sqs = torch.zeros(len(entries), dtype=torch.float32, device=nonempty_sqs.device)
-            nonempty_indices = torch.tensor(
-                [entry_idx for entry_idx, _ in nonempty_entries],
-                dtype=torch.long,
-                device=nonempty_sqs.device,
-            )
-            local_sqs.index_copy_(0, nonempty_indices, nonempty_sqs)
-            return local_sqs
 
         with torch.autograd.profiler.record_function(
             f"Muon-FSDP approx boundary global norm begin count={len(entries)}"
