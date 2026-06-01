@@ -376,6 +376,12 @@ class OptimizerConfig:
     Requires batched all-gather to take effect. Defaults to False.
     """
 
+    muon_fsdp_overlap_boundary_ready_event: bool = False
+    """If True, overlapped Muon+M-FSDP boundary gathers wait on an event recorded after
+    boundary pre-NS tensors are ready instead of waiting on later unrelated default-stream work.
+    This preserves the optimizer math and only changes scheduling. Defaults to False.
+    """
+
     muon_fsdp_overlap_boundary_prefetch_batches: int = 1
     """Number of Muon+M-FSDP boundary gather batches to keep queued during overlap.
     Values above 1 use distinct gather scratch scopes to double-buffer communication
