@@ -446,6 +446,11 @@ class OptimizerConfig:
     kernels when the updates share dtype, shape, and learning rate. Defaults to False.
     """
 
+    muon_fsdp_foreach_gather_weight_update: bool = False
+    """If True, also use torch foreach for eligible gather-mode Muon+M-FSDP weight updates after
+    slicing each full orthogonalized update back to the local FSDP shard. Defaults to False.
+    """
+
     # Lion.
     lion_beta1: float = 0.95
     """First beta coefficient for Lion optimizer (used in sign update). Defaults to 0.95."""

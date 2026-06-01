@@ -2552,6 +2552,13 @@ def _add_regularization_args(parser):
                        help='Apply eligible batched Muon+M-FSDP local/distributed weight '
                        'updates with torch foreach kernels. Preserves optimizer math and '
                        'reduces per-parameter update launches. Defaults to false.')
+    group.add_argument('--muon-fsdp-foreach-gather-weight-update',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='Also use torch foreach for eligible gather-mode Muon+M-FSDP '
+                       'weight updates after slicing each full orthogonalized update back '
+                       'to the local FSDP shard. Requires --muon-fsdp-foreach-weight-update. '
+                       'Defaults to false.')
     group.add_argument('--lion-beta1', type=float, default=0.95,
                        help='First beta coefficient for Lion optimizer '
                        '(used in sign update). Default: 0.95.')
