@@ -326,8 +326,9 @@ class OptimizerConfig:
 
     muon_fsdp_boundary_gather_dtype: str = 'fp32'
     """Communication dtype for Muon+M-FSDP boundary pre-NS all-gathers. Valid values are
-    'fp32', 'bf16', and 'int8'. The gathered tensor is converted back to the local pre-NS dtype
-    before Newton-Schulz. The int8 mode uses a symmetric per-batch scale.
+    'fp32', 'bf16', 'int8', 'fp8_e4m3fn', and 'fp8_e5m2'. The gathered tensor is converted
+    back to the local pre-NS dtype before Newton-Schulz. The int8 and fp8 modes use a
+    symmetric per-batch scale.
     """
 
     muon_fsdp_distributed_ns: bool = False
@@ -361,6 +362,12 @@ class OptimizerConfig:
     shape and size would otherwise be eligible for distributed Newton-Schulz.
     """
 
+    muon_fsdp_partial_distributed_ns: bool = False
+    """If True, exact mixed-shard Muon tensors may gather only the non-Newton-Schulz
+    matrix dimension and then run distributed Newton-Schulz over the remaining shard
+    dimension. Defaults to False.
+    """
+
     muon_fsdp_defer_distributed_ns_under_gather: bool = False
     """If True, do not run distributed Newton-Schulz while overlapped Muon+M-FSDP
     boundary all-gathers are pending.
@@ -386,6 +393,19 @@ class OptimizerConfig:
     """Number of Muon+M-FSDP boundary gather batches to keep queued during overlap.
     Values above 1 use distinct gather scratch scopes to double-buffer communication
     and reduce gaps between NCCL all-gathers. The math is unchanged.
+    """
+
+    muon_fsdp_overlap_boundary_post_compute_prefetch_batches: int = 0
+    """Target Muon+M-FSDP boundary gather queue depth after local/distributed under-gather
+    Newton-Schulz work finishes. This keeps the initial prefetch depth conservative while
+    allowing the boundary drain loop to queue more communication. A value of 0 disables
+    the top-up. The optimizer math is unchanged.
+    """
+
+    muon_fsdp_overlap_boundary_progress_during_local: bool = False
+    """If True, poll the oldest queued Muon+M-FSDP boundary gather between batched local
+    Newton-Schulz chunks and start the next gather batch when it is complete. This only
+    changes scheduling and preserves the optimizer math.
     """
 
     muon_fsdp_overlap_defer_boundary_batch_size: int = 1
