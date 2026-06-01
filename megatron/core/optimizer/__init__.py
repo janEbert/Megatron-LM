@@ -808,6 +808,9 @@ def _get_muon_fsdp_kwargs(config: OptimizerConfig) -> dict[str, Any]:
             config, "muon_fsdp_batched_distributed_newton_schulz_max_batch_bytes", 0
         ),
         "fsdp_foreach_weight_update": getattr(config, "muon_fsdp_foreach_weight_update", False),
+        "fsdp_foreach_gather_weight_update": getattr(
+            config, "muon_fsdp_foreach_gather_weight_update", False
+        ),
     }
 
 
