@@ -461,6 +461,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_approx_local_boundary_exclude_qkv: bool = False,
         fsdp_approx_local_boundary_max_local_numel: int = 0,
         fsdp_approx_local_boundary_global_norm_scale: bool = False,
+        fsdp_approx_local_boundary_foreach_norm: bool = False,
         fsdp_overlap_local_ns_first: bool = False,
         fsdp_overlap_comm_compute: bool = False,
         fsdp_overlap_boundary_ready_event: bool = False,
@@ -531,6 +532,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.fsdp_approx_local_boundary_global_norm_scale = (
             fsdp_approx_local_boundary_global_norm_scale
         )
+        self.fsdp_approx_local_boundary_foreach_norm = fsdp_approx_local_boundary_foreach_norm
         self.fsdp_overlap_local_ns_first = fsdp_overlap_local_ns_first
         self.fsdp_overlap_comm_compute = fsdp_overlap_comm_compute
         self.fsdp_overlap_boundary_ready_event = fsdp_overlap_boundary_ready_event
@@ -1012,6 +1014,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"{self.fsdp_approx_local_boundary_max_local_numel}, "
             "approx_local_boundary_global_norm_scale="
             f"{self.fsdp_approx_local_boundary_global_norm_scale}, "
+            "approx_local_boundary_foreach_norm="
+            f"{self.fsdp_approx_local_boundary_foreach_norm}, "
             f"distributed_ns_small_col_dim={self.fsdp_distributed_ns_small_col_dim}, "
             f"distributed_ns_min_numel={self.fsdp_distributed_ns_min_numel}, "
             f"partial_distributed_candidates={partial_distributed_candidate_count} "
@@ -2192,15 +2196,30 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         if not entries:
             return {}
 
+        def compute_local_sqs() -> torch.Tensor:
+            tensors = [pre_ns_grad for _, pre_ns_grad, _ in entries]
+            if self.fsdp_approx_local_boundary_foreach_norm and hasattr(torch, "_foreach_norm"):
+                try:
+                    norms = torch._foreach_norm(tensors, 2.0)
+                    return torch.stack([norm.to(dtype=torch.float32).square() for norm in norms])
+                except RuntimeError as exc:
+                    log_single_rank(
+                        logger,
+                        logging.WARNING,
+                        "Falling back from Muon-FSDP foreach norm scale path: %s",
+                        exc,
+                    )
+            return torch.stack(
+                [pre_ns_grad.float().square().sum() for _, pre_ns_grad, _ in entries]
+            )
+
         with torch.autograd.profiler.record_function(
             f"Muon-FSDP approx boundary global norm scale count={len(entries)}"
         ):
             with torch.autograd.profiler.record_function(
                 f"Muon-FSDP approx boundary global norm local-sq count={len(entries)}"
             ):
-                local_sqs = torch.stack(
-                    [pre_ns_grad.float().square().sum() for _, pre_ns_grad, _ in entries]
-                )
+                local_sqs = compute_local_sqs()
             global_sqs = local_sqs.clone()
             max_stage_count = max(
                 (len(plan["stages"]) for _, _, plan in entries if plan is not None), default=0

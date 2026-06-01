@@ -2567,6 +2567,13 @@ def _add_regularization_args(parser):
                        'each local boundary update by the local/global pre-Newton-Schulz '
                        'Frobenius norm ratio. This keeps block-local math but avoids '
                        'local-only norm amplification. Defaults to false.')
+    group.add_argument('--muon-fsdp-approx-local-boundary-foreach-norm',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='When approximate local-boundary global-norm scaling is '
+                       'enabled, compute local norms with torch foreach norm when '
+                       'available. This preserves the scaling formula while reducing '
+                       'per-parameter reduction launch overhead. Defaults to false.')
     group.add_argument('--muon-fsdp-overlap-local-ns-first',
                        action=argparse.BooleanOptionalAction,
                        default=False,

@@ -456,6 +456,12 @@ class OptimizerConfig:
     the block-local approximation but avoids local-only norm amplification.
     """
 
+    muon_fsdp_approx_local_boundary_foreach_norm: bool = False
+    """If True, compute approximate local-boundary global-norm local norms with
+    torch foreach norm when available. This preserves the scaling formula while
+    reducing per-parameter reduction launch overhead.
+    """
+
     muon_fsdp_overlap_local_ns_first: bool = False
     """If True, prioritize fully local Newton-Schulz/update work before distributed
     Newton-Schulz work while overlapped boundary all-gathers are pending.
