@@ -2639,6 +2639,14 @@ def _add_regularization_args(parser):
                        help='Approximate maximum Gram bytes per batched distributed '
                        'Muon+M-FSDP Newton-Schulz chunk. A value of 0 reuses '
                        '--muon-fsdp-batched-newton-schulz-max-batch-bytes. Default: 0.')
+    group.add_argument('--muon-fsdp-defer-local-pre-ns-to-batched-ns',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='For eligible fully local Muon+M-FSDP tensors, delay '
+                       'momentum/Nesterov pre-Newton-Schulz materialization until '
+                       'the batched Newton-Schulz chunk and build the batched NS '
+                       'input directly. This preserves per-tensor optimizer math '
+                       'and only changes materialization/scheduling. Defaults to false.')
     group.add_argument('--muon-fsdp-foreach-pre-ns',
                        action=argparse.BooleanOptionalAction,
                        default=False,

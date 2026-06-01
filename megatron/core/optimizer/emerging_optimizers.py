@@ -471,6 +471,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_batched_newton_schulz_max_numel: int = 16 * 1024 * 1024,
         fsdp_batched_newton_schulz_max_batch_bytes: int = 2 * 1024 * 1024 * 1024,
         fsdp_batched_distributed_newton_schulz_max_batch_bytes: int = 0,
+        fsdp_defer_local_pre_ns_to_batched_ns: bool = False,
         fsdp_foreach_pre_ns: bool = False,
         fsdp_foreach_weight_update: bool = False,
         fsdp_foreach_gather_weight_update: bool = False,
@@ -557,6 +558,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             fsdp_batched_distributed_newton_schulz_max_batch_bytes
             or fsdp_batched_newton_schulz_max_batch_bytes
         )
+        self.fsdp_defer_local_pre_ns_to_batched_ns = fsdp_defer_local_pre_ns_to_batched_ns
         self.fsdp_foreach_pre_ns = fsdp_foreach_pre_ns
         self.fsdp_foreach_weight_update = fsdp_foreach_weight_update
         self.fsdp_foreach_gather_weight_update = fsdp_foreach_gather_weight_update
@@ -1028,6 +1030,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             "approx_local_boundary_async_norm_all_reduce="
             f"{self.fsdp_approx_local_boundary_async_norm_all_reduce}, "
             f"batched_qkv_local_boundary={self.fsdp_batched_qkv_local_boundary}, "
+            f"defer_local_pre_ns_to_batched_ns={self.fsdp_defer_local_pre_ns_to_batched_ns}, "
             f"foreach_pre_ns={self.fsdp_foreach_pre_ns}, "
             f"distributed_ns_small_col_dim={self.fsdp_distributed_ns_small_col_dim}, "
             f"distributed_ns_min_numel={self.fsdp_distributed_ns_min_numel}, "
@@ -1450,6 +1453,10 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                             continue
 
                     grad = self._param_grad(p)
+                    if self._can_defer_local_pre_ns_to_batched_ns(p, grad, update_mode, group, lr):
+                        appended_indices.append(len(all_updates))
+                        all_updates.append((p, None, update_mode, lr, group_kwargs))
+                        continue
                     if self.fsdp_foreach_pre_ns and grad is not None:
                         foreach_candidates.append(
                             {
@@ -1606,6 +1613,41 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         if self.nesterov:
             return local_grad.lerp(mom_local, group["momentum"])
         return mom_local
+
+    def _can_defer_local_pre_ns_to_batched_ns(
+        self,
+        p: torch.Tensor,
+        grad: torch.Tensor | None,
+        update_mode: str,
+        group: dict[str, Any],
+        lr: float,
+    ) -> bool:
+        if not self.fsdp_defer_local_pre_ns_to_batched_ns:
+            return False
+        if update_mode != "local" or grad is None:
+            return False
+        if not self.fsdp_batched_newton_schulz:
+            return False
+        p_local = p._local_tensor
+        if p_local.ndim != 2 or p_local.numel() == 0:
+            return False
+        if p_local.numel() > self.fsdp_batched_newton_schulz_max_numel:
+            return False
+        if self._is_split_qkv_param(p) or self._tp_partition_dim_for_param(p) is not None:
+            return False
+        mom_local = self.state[p]["momentum_buffer"]._local_tensor
+        local_grad = grad._local_tensor
+        if local_grad.dtype != mom_local.dtype:
+            return False
+        if local_grad.shape != mom_local.shape or p_local.shape != mom_local.shape:
+            return False
+        weight_decay = group["weight_decay"]
+        weight_decay_method = getattr(self, "weight_decay_method", "l2")
+        if weight_decay != 0.0 and weight_decay_method != "decoupled":
+            return False
+        if group["lr"] != lr:
+            return False
+        return True
 
     def _append_foreach_local_pre_ns_updates(
         self, candidates: list[dict[str, Any]], all_updates: list, appended_indices: list[int]
@@ -1994,6 +2036,119 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         tensor_bytes = pre_ns_grad.numel() * pre_ns_grad.element_size()
         max_items = max(1, self.fsdp_batched_newton_schulz_max_batch_bytes // max(1, tensor_bytes))
         return [updates[start : start + max_items] for start in range(0, len(updates), max_items)]
+
+    def _fsdp_deferred_local_pre_ns_key(
+        self,
+        p: torch.Tensor,
+        pre_ns_grad: torch.Tensor | None,
+        update_mode: str,
+        lr: float,
+        group_kwargs: dict[str, Any],
+    ) -> tuple[str, tuple[int, ...], torch.dtype, torch.device, float, float, float] | None:
+        if not self.fsdp_defer_local_pre_ns_to_batched_ns:
+            return None
+        if update_mode != "local" or pre_ns_grad is not None:
+            return None
+        p_local = p._local_tensor
+        if p_local.ndim != 2 or p_local.numel() == 0:
+            return None
+        if p_local.numel() > self.fsdp_batched_newton_schulz_max_numel:
+            return None
+        if self._is_split_qkv_param(p) or self._tp_partition_dim_for_param(p) is not None:
+            return None
+        mom_local = self.state[p]["momentum_buffer"]._local_tensor
+        grad = self._param_grad(p)
+        if grad is None:
+            return None
+        local_grad = grad._local_tensor
+        if (
+            p_local.shape != mom_local.shape
+            or local_grad.shape != mom_local.shape
+            or local_grad.dtype != mom_local.dtype
+            or p_local.device != mom_local.device
+            or local_grad.device != mom_local.device
+        ):
+            return None
+        weight_decay = float(group_kwargs["weight_decay"])
+        weight_decay_method = getattr(self, "weight_decay_method", "l2")
+        if weight_decay != 0.0 and weight_decay_method != "decoupled":
+            return None
+        return (
+            "local_deferred_pre_ns",
+            tuple(p_local.shape),
+            mom_local.dtype,
+            mom_local.device,
+            float(lr),
+            float(group_kwargs["momentum"]),
+            weight_decay,
+        )
+
+    def _iter_deferred_local_pre_ns_chunks(self, updates: list) -> list[list]:
+        if not updates:
+            return []
+        p = updates[0][0]
+        tensor_bytes = p._local_tensor.numel() * p._local_tensor.element_size()
+        max_items = max(1, self.fsdp_batched_newton_schulz_max_batch_bytes // max(1, tensor_bytes))
+        return [updates[start : start + max_items] for start in range(0, len(updates), max_items)]
+
+    def _materialize_deferred_local_pre_ns_update(self, update: tuple) -> tuple:
+        p, pre_ns_grad, update_mode, lr, group_kwargs = update
+        if pre_ns_grad is not None:
+            return update
+        group = dict(group_kwargs)
+        pre_ns_grad = self._compute_local_pre_ns_grad(p, group, lr)
+        return (p, pre_ns_grad, update_mode, lr, group_kwargs)
+
+    def _compute_deferred_local_pre_ns_stack(self, chunk: list) -> torch.Tensor | None:
+        if not chunk:
+            return None
+        _, _, _, lr, group_kwargs = chunk[0]
+        momentum = float(group_kwargs["momentum"])
+        weight_decay = float(group_kwargs["weight_decay"])
+        if any(
+            update[3] != lr
+            or float(update[4]["momentum"]) != momentum
+            or float(update[4]["weight_decay"]) != weight_decay
+            for update in chunk
+        ):
+            return None
+        if not hasattr(torch, "_foreach_lerp_"):
+            return None
+
+        p_tensors = [update[0]._local_tensor for update in chunk]
+        mom_tensors = [self.state[update[0]]["momentum_buffer"]._local_tensor for update in chunk]
+        if any(p_tensor.dtype != p_tensors[0].dtype for p_tensor in p_tensors):
+            return None
+        if any(mom_tensor.dtype != mom_tensors[0].dtype for mom_tensor in mom_tensors):
+            return None
+        grad_tensors = []
+        for p, _, _, _, _ in chunk:
+            grad = self._param_grad(p)
+            if grad is None:
+                return None
+            local_grad = grad._local_tensor
+            if local_grad.dtype != mom_tensors[0].dtype:
+                return None
+            grad_tensors.append(local_grad)
+
+        with torch.autograd.profiler.record_function(
+            f"Muon-FSDP deferred local pre-NS stack count={len(chunk)}"
+        ):
+            if weight_decay != 0.0:
+                torch._foreach_add_(p_tensors, p_tensors, alpha=-(weight_decay * lr))
+            torch._foreach_lerp_(mom_tensors, grad_tensors, 1 - momentum)
+            source_tensors = grad_tensors if self.nesterov else mom_tensors
+            stacked_pre_ns = torch.empty(
+                (len(chunk),) + tuple(source_tensors[0].shape),
+                dtype=source_tensors[0].dtype,
+                device=source_tensors[0].device,
+            )
+            torch.stack(source_tensors, dim=0, out=stacked_pre_ns)
+            if self.nesterov:
+                stacked_mom = torch.empty_like(stacked_pre_ns)
+                torch.stack(mom_tensors, dim=0, out=stacked_mom)
+                stacked_pre_ns.lerp_(stacked_mom, momentum)
+        return stacked_pre_ns
 
     def _iter_batched_distributed_ns_chunks(self, updates: list) -> list[list]:
         if not updates:
@@ -2688,6 +2843,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         batch_map: dict[
             tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype, torch.device], list
         ] = {}
+        deferred_local_pre_ns_map: dict[
+            tuple[str, tuple[int, ...], torch.dtype, torch.device, float, float, float], list
+        ] = {}
         distributed_batch_map: dict[
             tuple[str, tuple[int, ...], torch.dtype, torch.device, int], list
         ] = {}
@@ -2726,6 +2884,15 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
         for update in updates:
             p, pre_ns_grad, update_mode, _, _ = update
+            deferred_local_key = self._fsdp_deferred_local_pre_ns_key(
+                p, pre_ns_grad, update_mode, update[3], update[4]
+            )
+            if deferred_local_key is not None:
+                deferred_local_pre_ns_map.setdefault(deferred_local_key, []).append(update)
+                shape_counts[(deferred_local_key[0], deferred_local_key[1])] = (
+                    shape_counts.get((deferred_local_key[0], deferred_local_key[1]), 0) + 1
+                )
+                continue
             distributed_key = self._fsdp_batched_distributed_ns_key(p, pre_ns_grad, update_mode)
             if distributed_key is not None:
                 distributed_batch_map.setdefault(distributed_key, []).append(update)
@@ -2788,6 +2955,36 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
         if self.fsdp_prioritize_distributed_ns:
             apply_distributed_batches()
+
+        for key, candidate_updates in deferred_local_pre_ns_map.items():
+            for chunk in self._iter_deferred_local_pre_ns_chunks(candidate_updates):
+                if len(chunk) < 2:
+                    for update in chunk:
+                        materialized_update = self._materialize_deferred_local_pre_ns_update(update)
+                        record_fallback(materialized_update, "singleton_deferred_pre_ns_batch")
+                        fallback_updates.append(materialized_update)
+                    continue
+                stacked_pre_ns = self._compute_deferred_local_pre_ns_stack(chunk)
+                if stacked_pre_ns is None:
+                    for update in chunk:
+                        materialized_update = self._materialize_deferred_local_pre_ns_update(update)
+                        record_fallback(materialized_update, "deferred_pre_ns_fallback")
+                        fallback_updates.append(materialized_update)
+                    continue
+                batched_chunks += 1
+                batched_updates += len(chunk)
+                _, shape, _, _, _, _, _ = key
+                with torch.autograd.profiler.record_function(
+                    "Muon-FSDP deferred local pre-NS batched NS/update "
+                    f"shape={shape} count={len(chunk)}"
+                ):
+                    orth_updates = self.scaled_orthogonalize_fn(stacked_pre_ns, None, None)
+                    if not self._try_apply_orthogonal_muon_update_foreach(chunk, orth_updates):
+                        for orth_update, (p, _, update_mode, lr, _) in zip(
+                            orth_updates.unbind(0), chunk
+                        ):
+                            self._apply_orthogonal_muon_update(p, orth_update, update_mode, lr)
+                maybe_progress()
 
         batch_items = list(batch_map.items())
         if norm_scale_work is not None and self.fsdp_approx_local_boundary_async_norm_all_reduce:
@@ -2892,6 +3089,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self._maybe_log_fsdp_batched_ns_summary(
             candidate_updates=(
                 sum(len(updates) for updates in batch_map.values())
+                + sum(len(updates) for updates in deferred_local_pre_ns_map.values())
                 + sum(len(updates) for updates in distributed_batch_map.values())
                 + sum(len(updates) for updates in partial_distributed_batch_map.values())
                 + sum(len(updates) for updates in qkv_batch_map.values())
