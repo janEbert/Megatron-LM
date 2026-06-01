@@ -2473,6 +2473,12 @@ def _add_regularization_args(parser):
                        help='Overlap Muon+M-FSDP boundary all-gathers with local '
                        'Newton-Schulz/update work. Requires batched all-gather. '
                        'Defaults to false.')
+    group.add_argument('--muon-fsdp-overlap-boundary-prefetch-batches',
+                       type=int,
+                       default=1,
+                       help='Number of Muon+M-FSDP boundary gather batches to keep '
+                       'queued during overlap. Values above 1 use double-buffered '
+                       'gather scratch scopes. Default: 1.')
     group.add_argument('--muon-fsdp-overlap-defer-boundary-batch-size',
                        type=int,
                        default=1,

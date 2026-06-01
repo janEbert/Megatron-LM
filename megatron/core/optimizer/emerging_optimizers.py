@@ -447,6 +447,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_defer_distributed_ns_under_gather: bool = False,
         fsdp_overlap_local_ns_first: bool = False,
         fsdp_overlap_comm_compute: bool = False,
+        fsdp_overlap_boundary_prefetch_batches: int = 1,
         fsdp_overlap_defer_boundary_batch_size: int = 1,
         fsdp_batched_newton_schulz: bool = False,
         fsdp_batched_newton_schulz_max_numel: int = 16 * 1024 * 1024,
@@ -484,6 +485,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.fsdp_defer_distributed_ns_under_gather = fsdp_defer_distributed_ns_under_gather
         self.fsdp_overlap_local_ns_first = fsdp_overlap_local_ns_first
         self.fsdp_overlap_comm_compute = fsdp_overlap_comm_compute
+        self.fsdp_overlap_boundary_prefetch_batches = max(1, fsdp_overlap_boundary_prefetch_batches)
         self.fsdp_overlap_defer_boundary_batch_size = max(1, fsdp_overlap_defer_boundary_batch_size)
         self.fsdp_batched_newton_schulz = fsdp_batched_newton_schulz
         self.fsdp_batched_newton_schulz_max_numel = fsdp_batched_newton_schulz_max_numel
@@ -496,6 +498,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self._uneven_gather_plan_cache: dict[int, dict[str, Any]] = {}
         self._flat_uneven_gather_plan_cache: dict[tuple[int, int], dict[str, Any] | None] = {}
         self._fsdp_gather_scratch_cache: dict[tuple[Any, ...], Any] = {}
+        self._fsdp_gather_scratch_scope: Any = None
         self._fsdp_comm_stream_cache: dict[torch.device, torch.cuda.Stream] = {}
         self._fsdp_gather_summary_logged = False
         self._fsdp_update_mode_summary_logged = False
@@ -533,6 +536,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         if not self.fsdp_reuse_gather_scratch:
             return torch.empty(numel, dtype=dtype, device=device)
 
+        if self._fsdp_gather_scratch_scope is not None:
+            key = ("scope", self._fsdp_gather_scratch_scope, *key)
         cached = self._fsdp_gather_scratch_cache.get(key)
         if (
             not isinstance(cached, torch.Tensor)
@@ -556,11 +561,26 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return [torch.empty(numel, dtype=dtype, device=device) for numel in rank_numels]
 
         key = ("uneven_group_tensors", id(shard_group), dtype, device, tuple(rank_numels))
+        if self._fsdp_gather_scratch_scope is not None:
+            key = ("scope", self._fsdp_gather_scratch_scope, *key)
         cached = self._fsdp_gather_scratch_cache.get(key)
         if not isinstance(cached, list):
             cached = [torch.empty(numel, dtype=dtype, device=device) for numel in rank_numels]
             self._fsdp_gather_scratch_cache[key] = cached
         return cached
+
+    def _with_fsdp_gather_scratch_scope(self, scope: Any):
+        optimizer = self
+
+        class _ScratchScope:
+            def __enter__(self):
+                self.previous_scope = optimizer._fsdp_gather_scratch_scope
+                optimizer._fsdp_gather_scratch_scope = scope
+
+            def __exit__(self, exc_type, exc, tb):
+                optimizer._fsdp_gather_scratch_scope = self.previous_scope
+
+        return _ScratchScope()
 
     def _candidate_batch_gather_bytes(
         self, stage_rank_total_numels: list[list[int]], plan: dict[str, Any], *, element_size: int
@@ -660,9 +680,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             min_items = max_items = 0
             avg_items = 0.0
 
-        log_single_rank(
-            logger,
-            logging.INFO,
+        message = (
             "Muon+M-FSDP gather summary: "
             f"boundary_items={len(items)}, completed_without_batch={completed_without_batch}, "
             f"batches={len(batches)} (flat={flat_batches}, staged={len(batches) - flat_batches}), "
@@ -675,8 +693,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"flat={self.fsdp_flat_batched_all_gather}, "
             f"overlap={self.fsdp_overlap_comm_compute}, "
             f"overlap_local_ns_first={self.fsdp_overlap_local_ns_first}, "
-            f"defer_boundary_batch_size={self.fsdp_overlap_defer_boundary_batch_size}.",
+            f"prefetch_batches={self.fsdp_overlap_boundary_prefetch_batches}, "
+            f"defer_boundary_batch_size={self.fsdp_overlap_defer_boundary_batch_size}."
         )
+        log_single_rank(logger, logging.INFO, message)
+        print_rank_0(message)
 
     def _gather_collective_nvtx_label(self, stage_state: dict[str, Any]) -> str:
         batch = stage_state["batch"]
@@ -1401,6 +1422,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
         batched_chunks = 0
         batched_updates = 0
+
         for key, candidate_updates in batch_map.items():
             for chunk in self._iter_batched_ns_chunks(candidate_updates):
                 if len(chunk) < 2:
@@ -1528,19 +1550,27 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         )
 
         batch_iter = iter(batches)
-        next_batch = next(batch_iter, None)
-        pending = None
-        if next_batch is not None:
+        pending_queue: list[tuple[dict[str, Any], int]] = []
+        prefetch_batches = (
+            self.fsdp_overlap_boundary_prefetch_batches if self.fsdp_overlap_comm_compute else 1
+        )
+        for slot in range(prefetch_batches):
+            next_batch = next(batch_iter, None)
+            if next_batch is None:
+                break
+            if prefetch_batches > 1:
+                next_batch["_scratch_scope"] = ("boundary_prefetch", slot)
             pending = self._start_gather_full_uneven_local_tensor_batch_async(
                 boundary_items, next_batch
             )
+            pending_queue.append((pending, slot))
 
         return {
             "boundary_items": boundary_items,
             "gathered_boundary_updates": gathered_boundary_updates,
             "completed_item_indices": completed_item_indices,
             "batch_iter": batch_iter,
-            "pending": pending,
+            "pending_queue": pending_queue,
         }
 
     def _overlap_boundary_gather_and_update(
@@ -1559,7 +1589,13 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         gathered_boundary_updates = gather_state["gathered_boundary_updates"]
         completed_item_indices = gather_state["completed_item_indices"]
         batch_iter = gather_state["batch_iter"]
-        pending = gather_state["pending"]
+        if "pending_queue" in gather_state:
+            pending_queue = gather_state["pending_queue"]
+        else:
+            pending_queue = []
+            pending = gather_state.get("pending")
+            if pending is not None:
+                pending_queue.append((pending, 0))
         applied_update_indices = applied_update_indices or set()
 
         deferred_distributed_updates = []
@@ -1663,22 +1699,29 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
         process_completed_items(completed_item_indices)
 
-        while pending is not None:
+        def start_next_pending(slot: int) -> None:
+            next_batch = next(batch_iter, None)
+            if next_batch is None:
+                return
+            if self.fsdp_overlap_boundary_prefetch_batches > 1:
+                next_batch["_scratch_scope"] = ("boundary_prefetch", slot)
+            with torch.autograd.profiler.record_function(
+                "Muon-FSDP phase 2c start next boundary gather"
+            ):
+                next_pending = self._start_gather_full_uneven_local_tensor_batch_async(
+                    boundary_items, next_batch
+                )
+            pending_queue.append((next_pending, slot))
+
+        while pending_queue:
+            pending, slot = pending_queue.pop(0)
             with torch.autograd.profiler.record_function(
                 "Muon-FSDP phase 2b finish overlapped boundary gather"
             ):
                 finished_item_indices = self._finish_gather_full_uneven_local_tensor_batch_async(
                     pending, gathered_boundary_updates
                 )
-            next_batch = next(batch_iter, None)
-            pending = None
-            if next_batch is not None:
-                with torch.autograd.profiler.record_function(
-                    "Muon-FSDP phase 2c start next boundary gather"
-                ):
-                    pending = self._start_gather_full_uneven_local_tensor_batch_async(
-                        boundary_items, next_batch
-                    )
+            start_next_pending(slot)
             process_completed_items(finished_item_indices)
 
         process_completed_items(set(range(len(boundary_update_indices))), force=True)
@@ -3354,106 +3397,109 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
     def _start_gather_full_uneven_local_tensor_batch_async(
         self, items: list[tuple[torch.Tensor, torch.Tensor]], batch: dict[str, Any]
     ) -> dict[str, Any]:
-        if batch.get("is_flat", False):
-            with torch.autograd.profiler.record_function("Muon-FSDP flat gather pack"):
-                stage_state = self._prepare_flat_uneven_gather_batch(items, batch)
-            pending_stage = self._start_uneven_gather_stage(stage_state, async_op=True)
-            return {"items": items, "batch": batch, "pending_flat_stage": pending_stage}
+        with self._with_fsdp_gather_scratch_scope(batch.get("_scratch_scope")):
+            if batch.get("is_flat", False):
+                with torch.autograd.profiler.record_function("Muon-FSDP flat gather pack"):
+                    stage_state = self._prepare_flat_uneven_gather_batch(items, batch)
+                pending_stage = self._start_uneven_gather_stage(stage_state, async_op=True)
+                return {"items": items, "batch": batch, "pending_flat_stage": pending_stage}
 
-        item_indices = batch["item_indices"]
-        plans = batch["plans"]
-        current_buffers = [
-            self._flatten_tensor_for_uneven_gather(items[item_idx][1]) for item_idx in item_indices
-        ]
+            item_indices = batch["item_indices"]
+            plans = batch["plans"]
+            current_buffers = [
+                self._flatten_tensor_for_uneven_gather(items[item_idx][1])
+                for item_idx in item_indices
+            ]
 
-        if batch["device"].type == "cuda" and len(plans[0]["stages"]) > 1:
-            pending_stages = []
-            final_stage_idx = len(plans[0]["stages"]) - 1
-            with torch.cuda.device(batch["device"]):
-                comm_stream = self._get_fsdp_comm_stream(batch["device"])
-                comm_stream.wait_stream(torch.cuda.current_stream())
-                with torch.cuda.stream(comm_stream):
-                    for stage_idx, stage in enumerate(plans[0]["stages"]):
-                        stage_state = self._prepare_uneven_gather_stage(
-                            current_buffers, plans, batch, stage_idx, stage
-                        )
-                        pending_stage = self._issue_uneven_gather_stage(
-                            stage_state, async_op=True, comm_stream=comm_stream
-                        )
-                        if stage_idx == final_stage_idx:
-                            pending_stages.append(pending_stage)
-                            break
-                        if not self._block_current_stream_on_uneven_gather_stage(pending_stage):
-                            if stage_idx == 0:
-                                return {
-                                    "items": items,
-                                    "batch": batch,
-                                    "current_buffers": current_buffers,
-                                    "pending_stage": pending_stage,
-                                }
-                            raise AssertionError(
-                                "Muon+M-FSDP async multi-stage gather requires "
-                                "torch.distributed.Work.block_current_stream()."
+            if batch["device"].type == "cuda" and len(plans[0]["stages"]) > 1:
+                pending_stages = []
+                final_stage_idx = len(plans[0]["stages"]) - 1
+                with torch.cuda.device(batch["device"]):
+                    comm_stream = self._get_fsdp_comm_stream(batch["device"])
+                    comm_stream.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(comm_stream):
+                        for stage_idx, stage in enumerate(plans[0]["stages"]):
+                            stage_state = self._prepare_uneven_gather_stage(
+                                current_buffers, plans, batch, stage_idx, stage
                             )
-                        pending_stages.append(pending_stage)
-                        current_buffers = self._unpack_uneven_gather_stage(pending_stage)
+                            pending_stage = self._issue_uneven_gather_stage(
+                                stage_state, async_op=True, comm_stream=comm_stream
+                            )
+                            if stage_idx == final_stage_idx:
+                                pending_stages.append(pending_stage)
+                                break
+                            if not self._block_current_stream_on_uneven_gather_stage(pending_stage):
+                                if stage_idx == 0:
+                                    return {
+                                        "items": items,
+                                        "batch": batch,
+                                        "current_buffers": current_buffers,
+                                        "pending_stage": pending_stage,
+                                    }
+                                raise AssertionError(
+                                    "Muon+M-FSDP async multi-stage gather requires "
+                                    "torch.distributed.Work.block_current_stream()."
+                                )
+                            pending_stages.append(pending_stage)
+                            current_buffers = self._unpack_uneven_gather_stage(pending_stage)
 
-            return {
-                "items": items,
-                "batch": batch,
-                "pending_stages": pending_stages[:-1],
-                "final_pending_stage": pending_stages[-1],
-            }
+                return {
+                    "items": items,
+                    "batch": batch,
+                    "pending_stages": pending_stages[:-1],
+                    "final_pending_stage": pending_stages[-1],
+                }
 
-        stage_state = self._prepare_uneven_gather_stage(
-            current_buffers, plans, batch, 0, plans[0]["stages"][0]
-        )
-        pending_stage = self._start_uneven_gather_stage(stage_state, async_op=True)
-        return {"items": items, "batch": batch, "pending_stage": pending_stage}
+            stage_state = self._prepare_uneven_gather_stage(
+                current_buffers, plans, batch, 0, plans[0]["stages"][0]
+            )
+            pending_stage = self._start_uneven_gather_stage(stage_state, async_op=True)
+            return {"items": items, "batch": batch, "pending_stage": pending_stage}
 
     def _finish_gather_full_uneven_local_tensor_batch_async(
         self, pending: dict[str, Any], results: list[torch.Tensor | None]
     ) -> list[int]:
-        items = pending["items"]
         batch = pending["batch"]
-        plans = batch["plans"]
-        if "pending_flat_stage" in pending:
-            pending_stage = pending["pending_flat_stage"]
-            self._wait_uneven_gather_stage(pending_stage)
-            with torch.autograd.profiler.record_function("Muon-FSDP flat gather reconstruct"):
-                return self._store_flat_uneven_gather_batch_results(
-                    items, results, batch, pending_stage
-                )
-
-        if "final_pending_stage" in pending:
-            for pending_stage in pending["pending_stages"]:
+        with self._with_fsdp_gather_scratch_scope(batch.get("_scratch_scope")):
+            items = pending["items"]
+            plans = batch["plans"]
+            if "pending_flat_stage" in pending:
+                pending_stage = pending["pending_flat_stage"]
                 self._wait_uneven_gather_stage(pending_stage)
-            final_pending_stage = pending["final_pending_stage"]
-            self._wait_uneven_gather_stage(final_pending_stage)
-            return self._store_uneven_gather_batch_results_from_stage(
-                items, results, batch, final_pending_stage
-            )
+                with torch.autograd.profiler.record_function("Muon-FSDP flat gather reconstruct"):
+                    return self._store_flat_uneven_gather_batch_results(
+                        items, results, batch, pending_stage
+                    )
 
-        final_stage_idx = len(plans[0]["stages"]) - 1
-        if final_stage_idx == 0:
-            self._wait_uneven_gather_stage(pending["pending_stage"])
-            return self._store_uneven_gather_batch_results_from_stage(
-                items, results, batch, pending["pending_stage"]
-            )
-
-        current_buffers = self._finish_uneven_gather_stage(pending["pending_stage"])
-
-        for stage_idx in range(1, len(plans[0]["stages"])):
-            stage_state = self._prepare_uneven_gather_stage(
-                current_buffers, plans, batch, stage_idx, plans[0]["stages"][stage_idx]
-            )
-            pending_stage = self._start_uneven_gather_stage(stage_state, async_op=False)
-            if stage_idx == final_stage_idx:
-                self._wait_uneven_gather_stage(pending_stage)
+            if "final_pending_stage" in pending:
+                for pending_stage in pending["pending_stages"]:
+                    self._wait_uneven_gather_stage(pending_stage)
+                final_pending_stage = pending["final_pending_stage"]
+                self._wait_uneven_gather_stage(final_pending_stage)
                 return self._store_uneven_gather_batch_results_from_stage(
-                    items, results, batch, pending_stage
+                    items, results, batch, final_pending_stage
                 )
-            current_buffers = self._finish_uneven_gather_stage(pending_stage)
+
+            final_stage_idx = len(plans[0]["stages"]) - 1
+            if final_stage_idx == 0:
+                self._wait_uneven_gather_stage(pending["pending_stage"])
+                return self._store_uneven_gather_batch_results_from_stage(
+                    items, results, batch, pending["pending_stage"]
+                )
+
+            current_buffers = self._finish_uneven_gather_stage(pending["pending_stage"])
+
+            for stage_idx in range(1, len(plans[0]["stages"])):
+                stage_state = self._prepare_uneven_gather_stage(
+                    current_buffers, plans, batch, stage_idx, plans[0]["stages"][stage_idx]
+                )
+                pending_stage = self._start_uneven_gather_stage(stage_state, async_op=False)
+                if stage_idx == final_stage_idx:
+                    self._wait_uneven_gather_stage(pending_stage)
+                    return self._store_uneven_gather_batch_results_from_stage(
+                        items, results, batch, pending_stage
+                    )
+                current_buffers = self._finish_uneven_gather_stage(pending_stage)
 
         raise AssertionError("Batched uneven DTensor gather did not reach its final stage.")
 
