@@ -449,6 +449,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_defer_partial_distributed_ns_under_gather: bool = False,
         fsdp_async_partial_distributed_gather: bool = False,
         fsdp_approx_local_boundary_update: bool = False,
+        fsdp_approx_local_boundary_full_shape_scale: bool = False,
+        fsdp_approx_local_boundary_exclude_qkv: bool = False,
+        fsdp_approx_local_boundary_max_local_numel: int = 0,
         fsdp_overlap_local_ns_first: bool = False,
         fsdp_overlap_comm_compute: bool = False,
         fsdp_overlap_boundary_ready_event: bool = False,
@@ -506,6 +509,13 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         )
         self.fsdp_async_partial_distributed_gather = fsdp_async_partial_distributed_gather
         self.fsdp_approx_local_boundary_update = fsdp_approx_local_boundary_update
+        self.fsdp_approx_local_boundary_full_shape_scale = (
+            fsdp_approx_local_boundary_full_shape_scale
+        )
+        self.fsdp_approx_local_boundary_exclude_qkv = fsdp_approx_local_boundary_exclude_qkv
+        self.fsdp_approx_local_boundary_max_local_numel = max(
+            0, fsdp_approx_local_boundary_max_local_numel
+        )
         self.fsdp_overlap_local_ns_first = fsdp_overlap_local_ns_first
         self.fsdp_overlap_comm_compute = fsdp_overlap_comm_compute
         self.fsdp_overlap_boundary_ready_event = fsdp_overlap_boundary_ready_event
@@ -887,12 +897,18 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         partial_distributed_shape_counts: dict[
             tuple[tuple[int, ...], tuple[int, ...], int, tuple[tuple[int, int, int], ...]], int
         ] = {}
+        boundary_full_shape_counts: dict[tuple[str, tuple[int, ...], tuple[int, ...]], int] = {}
         for param, pre_ns_grad, update_mode, _, _ in all_updates:
             mode_counts[update_mode] = mode_counts.get(update_mode, 0) + 1
             tensor = pre_ns_grad if pre_ns_grad is not None else param._local_tensor
             mode_numels[update_mode] = mode_numels.get(update_mode, 0) + tensor.numel()
             shape_key = (update_mode, tuple(tensor.shape))
             update_shape_counts[shape_key] = update_shape_counts.get(shape_key, 0) + 1
+            if update_mode in ("gather", "local_boundary", "partial_distributed"):
+                boundary_key = (update_mode, tuple(param.shape), tuple(tensor.shape))
+                boundary_full_shape_counts[boundary_key] = (
+                    boundary_full_shape_counts.get(boundary_key, 0) + 1
+                )
             if getattr(param, "is_qkv", False) or getattr(
                 getattr(param, "orig_param", None), "is_qkv", False
             ):
@@ -914,6 +930,13 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         )[:8]
         top_update_shapes_text = ", ".join(
             f"{mode}{shape}: {count}" for (mode, shape), count in top_update_shapes
+        )
+        top_boundary_shapes = sorted(
+            boundary_full_shape_counts.items(), key=lambda item: item[1], reverse=True
+        )[:8]
+        top_boundary_shapes_text = ", ".join(
+            f"{mode} full={full_shape} local={local_shape}: {count}"
+            for (mode, full_shape, local_shape), count in top_boundary_shapes
         )
         top_partial_distributed_shapes = sorted(
             partial_distributed_shape_counts.items(), key=lambda item: item[1], reverse=True
@@ -962,11 +985,18 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             "defer_partial_distributed_ns_under_gather="
             f"{self.fsdp_defer_partial_distributed_ns_under_gather}, "
             f"approx_local_boundary_update={self.fsdp_approx_local_boundary_update}, "
+            "approx_local_boundary_full_shape_scale="
+            f"{self.fsdp_approx_local_boundary_full_shape_scale}, "
+            "approx_local_boundary_exclude_qkv="
+            f"{self.fsdp_approx_local_boundary_exclude_qkv}, "
+            "approx_local_boundary_max_local_numel="
+            f"{self.fsdp_approx_local_boundary_max_local_numel}, "
             f"distributed_ns_small_col_dim={self.fsdp_distributed_ns_small_col_dim}, "
             f"distributed_ns_min_numel={self.fsdp_distributed_ns_min_numel}, "
             f"partial_distributed_candidates={partial_distributed_candidate_count} "
             f"({partial_distributed_candidate_numels / 1e9:.3f}B local elems), "
             f"top_partial_distributed_candidates=[{top_partial_distributed_shapes_text}], "
+            f"top_boundary_shapes=[{top_boundary_shapes_text}], "
             f"top_update_shapes=[{top_update_shapes_text}]."
         )
         log_single_rank(logger, logging.INFO, message)
@@ -1650,7 +1680,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
     def _fsdp_batched_ns_key(
         self, p: torch.Tensor, pre_ns_grad: torch.Tensor | None, update_mode: str
-    ) -> tuple[str, tuple[int, ...], torch.dtype, torch.device] | None:
+    ) -> tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype, torch.device] | None:
         if not self.fsdp_batched_newton_schulz:
             return None
         if update_mode in ("distributed", "partial_distributed") or pre_ns_grad is None:
@@ -1661,7 +1691,16 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return None
         if self._is_split_qkv_param(p) or self._tp_partition_dim_for_param(p) is not None:
             return None
-        return (update_mode, tuple(pre_ns_grad.shape), pre_ns_grad.dtype, pre_ns_grad.device)
+        scale_shape: tuple[int, ...] = ()
+        if update_mode == "local_boundary" and self.fsdp_approx_local_boundary_full_shape_scale:
+            scale_shape = tuple(int(dim) for dim in p.shape)
+        return (
+            update_mode,
+            tuple(pre_ns_grad.shape),
+            scale_shape,
+            pre_ns_grad.dtype,
+            pre_ns_grad.device,
+        )
 
     def _fsdp_batched_distributed_ns_key(
         self, p: torch.Tensor, pre_ns_grad: torch.Tensor | None, update_mode: str
@@ -2011,6 +2050,24 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         log_single_rank(logger, logging.INFO, message)
         self._maybe_print_fsdp_diagnostic(message)
 
+    def _approx_local_boundary_orthogonalize(
+        self, p: torch.Tensor, pre_ns_grad: torch.Tensor
+    ) -> torch.Tensor:
+        orth_update = newton_schulz_tp(
+            pre_ns_grad,
+            steps=self.num_ns_steps,
+            coefficient_type=self.coefficient_type,
+            tp_group=None,
+            partition_dim=None,
+            tp_mode="duplicated" if self.tp_mode == "blockwise" else self.tp_mode,
+            use_syrk=self.use_syrk,
+        )
+        scale_factor = get_muon_scale_factor(
+            int(p.shape[-2]), int(p.shape[-1]), mode=self.scale_mode
+        )
+        orth_update.mul_(scale_factor * self.extra_scale_factor)
+        return orth_update
+
     def _apply_orthogonal_muon_update(
         self, p: torch.Tensor, orth_update: torch.Tensor, update_mode: str, lr: float
     ) -> None:
@@ -2141,7 +2198,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 maybe_progress()
             return
 
-        batch_map: dict[tuple[str, tuple[int, ...], torch.dtype, torch.device], list] = {}
+        batch_map: dict[
+            tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype, torch.device], list
+        ] = {}
         distributed_batch_map: dict[
             tuple[str, tuple[int, ...], torch.dtype, torch.device, int], list
         ] = {}
@@ -2226,12 +2285,17 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                     continue
                 batched_chunks += 1
                 batched_updates += len(chunk)
-                mode, shape, _, _ = key
+                mode, shape, scale_shape, _, _ = key
                 with torch.autograd.profiler.record_function(
                     f"Muon-FSDP batched NS/update mode={mode} shape={shape} count={len(chunk)}"
                 ):
                     stacked_pre_ns = torch.stack([update[1] for update in chunk], dim=0)
-                    orth_updates = self.scaled_orthogonalize_fn(stacked_pre_ns, None, None)
+                    if mode == "local_boundary" and scale_shape:
+                        orth_updates = self._approx_local_boundary_orthogonalize(
+                            chunk[0][0], stacked_pre_ns
+                        )
+                    else:
+                        orth_updates = self.scaled_orthogonalize_fn(stacked_pre_ns, None, None)
                     if not self._try_apply_orthogonal_muon_update_foreach(chunk, orth_updates):
                         for orth_update, (p, _, update_mode, lr, _) in zip(
                             orth_updates.unbind(0), chunk
@@ -2346,13 +2410,23 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return
 
         with torch.autograd.profiler.record_function(
-            f"Muon-FSDP individual NS/update mode=local shape={tuple(pre_ns_grad.shape)}"
+            f"Muon-FSDP individual NS/update mode={update_mode} shape={tuple(pre_ns_grad.shape)}"
         ):
-            orth_update = (
-                super(FSDPTensorParallelMuon, self)
-                .orthogonalize(p, pre_ns_grad, **group_kwargs)
-                .to(dtype=p._local_tensor.dtype)
-            )
+            if (
+                update_mode == "local_boundary"
+                and self.fsdp_approx_local_boundary_full_shape_scale
+                and not self._is_split_qkv_param(p)
+                and self._tp_partition_dim_for_param(p) is None
+            ):
+                orth_update = self._approx_local_boundary_orthogonalize(p, pre_ns_grad).to(
+                    dtype=p._local_tensor.dtype
+                )
+            else:
+                orth_update = (
+                    super(FSDPTensorParallelMuon, self)
+                    .orthogonalize(p, pre_ns_grad, **group_kwargs)
+                    .to(dtype=p._local_tensor.dtype)
+                )
         self._apply_orthogonal_muon_update(p, orth_update, update_mode, lr)
 
     def _attach_boundary_ready_events(self, batches: list[dict[str, Any]]) -> None:
@@ -3419,6 +3493,13 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         if self._get_fsdp_partial_distributed_ns_plan(param) is not None:
             return "partial_distributed"
         if self.fsdp_approx_local_boundary_update:
+            if self.fsdp_approx_local_boundary_exclude_qkv and self._is_split_qkv_param(param):
+                return "gather"
+            if (
+                self.fsdp_approx_local_boundary_max_local_numel > 0
+                and param._local_tensor.numel() > self.fsdp_approx_local_boundary_max_local_numel
+            ):
+                return "gather"
             return "local_boundary"
         return "gather"
 
