@@ -435,6 +435,11 @@ class OptimizerConfig:
     chunk. A value of 0 reuses muon_fsdp_batched_newton_schulz_max_batch_bytes.
     """
 
+    muon_fsdp_foreach_weight_update: bool = False
+    """If True, apply batched Muon+M-FSDP local/distributed weight updates with torch foreach
+    kernels when the updates share dtype, shape, and learning rate. Defaults to False.
+    """
+
     # Lion.
     lion_beta1: float = 0.95
     """First beta coefficient for Lion optimizer (used in sign update). Defaults to 0.95."""

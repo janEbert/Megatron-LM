@@ -459,6 +459,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_batched_newton_schulz_max_numel: int = 16 * 1024 * 1024,
         fsdp_batched_newton_schulz_max_batch_bytes: int = 2 * 1024 * 1024 * 1024,
         fsdp_batched_distributed_newton_schulz_max_batch_bytes: int = 0,
+        fsdp_foreach_weight_update: bool = False,
         **kwargs: Any,
     ) -> None:
         assert _HAVE_DTENSOR, (
@@ -513,6 +514,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             fsdp_batched_distributed_newton_schulz_max_batch_bytes
             or fsdp_batched_newton_schulz_max_batch_bytes
         )
+        self.fsdp_foreach_weight_update = fsdp_foreach_weight_update
         self._boundary_gather_indices_cache: dict[tuple[int, ...], set[int]] = {}
         self._uneven_gather_plan_cache: dict[int, dict[str, Any]] = {}
         self._partial_uneven_gather_plan_cache: dict[
@@ -1702,6 +1704,10 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         )
         scale_factor = get_muon_scale_factor(p0.shape[-2], p0.shape[-1], mode=self.scale_mode)
         orth_updates.mul_(scale_factor * self.extra_scale_factor)
+        if not padded_local_rows and self._try_apply_orthogonal_muon_update_foreach(
+            chunk, orth_updates
+        ):
+            return
         for batch_idx, (p, _, update_mode, lr, _) in enumerate(chunk):
             if padded_local_rows:
                 orth_update = orth_updates[batch_idx, : row_counts[batch_idx]]
@@ -1819,6 +1825,52 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.pre_weight_update_fn_inplace(p._local_tensor, local_update)
         p._local_tensor.add_(local_update, alpha=-lr)
         self.post_weight_update_fn_inplace(p._local_tensor)
+
+    def _try_apply_orthogonal_muon_update_foreach(
+        self, chunk: list, orth_updates: torch.Tensor
+    ) -> bool:
+        if not self.fsdp_foreach_weight_update or not chunk:
+            return False
+        if not hasattr(torch, "_foreach_add_"):
+            return False
+        if orth_updates.ndim < 1 or int(orth_updates.shape[0]) != len(chunk):
+            return False
+
+        first_lr = chunk[0][3]
+        if any(update[3] != first_lr for update in chunk):
+            return False
+
+        # Gather-mode updates require per-parameter slicing from the full
+        # gathered tensor. Keep them on the existing path and batch the common
+        # local/distributed chunks where each update already matches the local shard.
+        if any(update[2] == "gather" for update in chunk):
+            return False
+
+        param_tensors = [update[0]._local_tensor for update in chunk]
+        target_dtype = param_tensors[0].dtype
+        if any(param_tensor.dtype != target_dtype for param_tensor in param_tensors):
+            return False
+
+        local_updates = orth_updates
+        if local_updates.dtype != target_dtype:
+            local_updates = local_updates.to(dtype=target_dtype)
+
+        update_tensors = []
+        for batch_idx, param_tensor in enumerate(param_tensors):
+            update_tensor = local_updates[batch_idx]
+            if tuple(update_tensor.shape) != tuple(param_tensor.shape):
+                return False
+            update_tensors.append(update_tensor)
+
+        with torch.autograd.profiler.record_function(
+            f"Muon-FSDP foreach weight update count={len(chunk)}"
+        ):
+            for param_tensor, update_tensor in zip(param_tensors, update_tensors):
+                self.pre_weight_update_fn_inplace(param_tensor, update_tensor)
+            torch._foreach_add_(param_tensors, update_tensors, alpha=-first_lr)
+            for param_tensor in param_tensors:
+                self.post_weight_update_fn_inplace(param_tensor)
+        return True
 
     def _apply_batched_qkv_muon_updates(
         self, chunk: list, mode: str, shape: tuple[int, ...], split_dim: int
@@ -1984,10 +2036,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 ):
                     stacked_pre_ns = torch.stack([update[1] for update in chunk], dim=0)
                     orth_updates = self.scaled_orthogonalize_fn(stacked_pre_ns, None, None)
-                    for orth_update, (p, _, update_mode, lr, _) in zip(
-                        orth_updates.unbind(0), chunk
-                    ):
-                        self._apply_orthogonal_muon_update(p, orth_update, update_mode, lr)
+                    if not self._try_apply_orthogonal_muon_update_foreach(chunk, orth_updates):
+                        for orth_update, (p, _, update_mode, lr, _) in zip(
+                            orth_updates.unbind(0), chunk
+                        ):
+                            self._apply_orthogonal_muon_update(p, orth_update, update_mode, lr)
                 maybe_progress()
 
         for key, candidate_updates in distributed_batch_map.items():
