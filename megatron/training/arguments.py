@@ -2518,6 +2518,25 @@ def _add_regularization_args(parser):
                        'local boundary shards without gathering the full tensor. This '
                        'changes optimizer math and is intended only for guarded '
                        'throughput/numerics experiments. Defaults to false.')
+    group.add_argument('--muon-fsdp-approx-local-boundary-full-shape-scale',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='When approximate local boundary updates are enabled, scale '
+                       'local boundary shards with the full parameter shape rather than '
+                       'the local shard shape. This remains approximate but is closer to '
+                       'exact Muon update scaling. Defaults to false.')
+    group.add_argument('--muon-fsdp-approx-local-boundary-exclude-qkv',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='When approximate local boundary updates are enabled, keep '
+                       'split-QKV boundary tensors on the exact gather path. Defaults to '
+                       'false.')
+    group.add_argument('--muon-fsdp-approx-local-boundary-max-local-numel',
+                       type=int,
+                       default=0,
+                       help='When approximate local boundary updates are enabled, only '
+                       'approximate boundary tensors whose local shard has at most this '
+                       'many elements. A value <= 0 disables the cap. Defaults to 0.')
     group.add_argument('--muon-fsdp-overlap-local-ns-first',
                        action=argparse.BooleanOptionalAction,
                        default=False,

@@ -793,6 +793,15 @@ def _get_muon_fsdp_kwargs(config: OptimizerConfig) -> dict[str, Any]:
         "fsdp_approx_local_boundary_update": getattr(
             config, "muon_fsdp_approx_local_boundary_update", False
         ),
+        "fsdp_approx_local_boundary_full_shape_scale": getattr(
+            config, "muon_fsdp_approx_local_boundary_full_shape_scale", False
+        ),
+        "fsdp_approx_local_boundary_exclude_qkv": getattr(
+            config, "muon_fsdp_approx_local_boundary_exclude_qkv", False
+        ),
+        "fsdp_approx_local_boundary_max_local_numel": getattr(
+            config, "muon_fsdp_approx_local_boundary_max_local_numel", 0
+        ),
         "fsdp_overlap_local_ns_first": getattr(config, "muon_fsdp_overlap_local_ns_first", False),
         "fsdp_overlap_comm_compute": getattr(config, "muon_fsdp_overlap_comm_compute", False),
         "fsdp_overlap_boundary_ready_event": getattr(
