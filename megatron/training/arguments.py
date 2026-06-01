@@ -2346,6 +2346,11 @@ def _add_regularization_args(parser):
                        help='How to perform NS calculation for tensor model parallel weights')
     group.add_argument('--muon-extra-scale-factor', type=float, default=1.0,
                        help='Additional scale factor for the muon update')
+    group.add_argument('--muon-use-syrk',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='Use Triton SYRK kernels for Muon Newton-Schulz when supported. '
+                       'Defaults to false.')
     group.add_argument('--muon-scalar-optimizer', type=str, default='adam',
                        choices=['adam', 'lion'],
                        help='Optimizer for scalar parameters (embeddings, biases, norms) '
@@ -2391,12 +2396,77 @@ def _add_regularization_args(parser):
                        default=True,
                        help='View contiguous gathered Muon+M-FSDP buffers without an '
                        'additional reconstruction copy. Defaults to true.')
+    group.add_argument('--muon-fsdp-boundary-gather-dtype', type=str, default='fp32',
+                       choices=['fp32', 'bf16'],
+                       help='Communication dtype for Muon+M-FSDP boundary pre-NS '
+                       'all-gathers. The gathered tensor is converted back before '
+                       'Newton-Schulz. Defaults to fp32.')
+    group.add_argument('--muon-fsdp-distributed-ns',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='Use distributed Newton-Schulz over eligible FSDP row shards '
+                       'instead of all-gathering the full Muon update. Defaults to false.')
+    group.add_argument('--muon-fsdp-distributed-ns-min-numel', type=int, default=0,
+                       help='Minimum full parameter numel required to use Muon+M-FSDP '
+                       'distributed Newton-Schulz. A value of 0 applies it to every '
+                       'eligible boundary parameter when enabled. Default: 0.')
+    group.add_argument('--muon-fsdp-distributed-ns-small-col-dim', type=int, default=0,
+                       help='Also use Muon+M-FSDP distributed Newton-Schulz for eligible '
+                       'row-sharded boundary parameters whose column dimension is at most '
+                       'this value, even if they are below the min-numel threshold. '
+                       'Default: 0.')
+    group.add_argument('--muon-fsdp-distributed-ns-single-all-reduce',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='Use a one-all-reduce Gram recurrence for eligible Muon+M-FSDP '
+                       'distributed Newton-Schulz chunks. This reduces NCCL all-reduces '
+                       'during NS by trading for extra local Gram GEMMs. Defaults to false.')
+    group.add_argument('--muon-fsdp-distributed-ns-gram-refresh-interval',
+                       type=int,
+                       default=1,
+                       help='Refresh the Muon+M-FSDP distributed Newton-Schulz Gram '
+                       'all-reduce every N steps. A value of 1 keeps the exact per-step '
+                       'all-reduce path. Default: 1.')
+    group.add_argument('--muon-fsdp-distributed-ns-exclude-qkv',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='Keep split-QKV tensors on the Muon+M-FSDP boundary all-gather '
+                       'path even when they would otherwise be eligible for distributed '
+                       'Newton-Schulz. Defaults to false.')
+    group.add_argument('--muon-fsdp-defer-distributed-ns-under-gather',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='Do not run Muon+M-FSDP distributed Newton-Schulz while '
+                       'overlapped boundary all-gathers are pending. Defaults to false.')
     group.add_argument('--muon-fsdp-overlap-comm-compute',
                        action=argparse.BooleanOptionalAction,
                        default=False,
                        help='Overlap Muon+M-FSDP boundary all-gathers with local '
                        'Newton-Schulz/update work. Requires batched all-gather. '
                        'Defaults to false.')
+    group.add_argument('--muon-fsdp-overlap-defer-boundary-batch-size',
+                       type=int,
+                       default=1,
+                       help='Minimum same-key completed Muon+M-FSDP boundary updates '
+                       'to collect before applying them during overlap. Default: 1.')
+    group.add_argument('--muon-fsdp-batched-newton-schulz',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='Batch same-shaped Muon+M-FSDP Newton-Schulz updates to reduce '
+                       'kernel launch overhead. Defaults to false.')
+    group.add_argument('--muon-fsdp-batched-newton-schulz-max-numel', type=int,
+                       default=16 * 1024 * 1024,
+                       help='Maximum elements in one pre-NS tensor eligible for batched '
+                       'Muon+M-FSDP Newton-Schulz. Default: 16777216.')
+    group.add_argument('--muon-fsdp-batched-newton-schulz-max-batch-bytes', type=int,
+                       default=2 * 1024 * 1024 * 1024,
+                       help='Approximate maximum input bytes per batched Muon+M-FSDP '
+                       'Newton-Schulz chunk. Default: 2147483648.')
+    group.add_argument('--muon-fsdp-batched-distributed-newton-schulz-max-batch-bytes',
+                       type=int, default=0,
+                       help='Approximate maximum Gram bytes per batched distributed '
+                       'Muon+M-FSDP Newton-Schulz chunk. A value of 0 reuses '
+                       '--muon-fsdp-batched-newton-schulz-max-batch-bytes. Default: 0.')
     group.add_argument('--lion-beta1', type=float, default=0.95,
                        help='First beta coefficient for Lion optimizer '
                        '(used in sign update). Default: 0.95.')

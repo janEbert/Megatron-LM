@@ -1240,19 +1240,27 @@ class MegatronFSDP(torch.nn.Module):
                 other settings.
             force_dispatch (bool, optional): force dispatch regardless of other settings.
         """
-        self._replace_param_with_raw_if_needed()
+        with torch.autograd.profiler.record_function("M-FSDP start_param_sync replace raw"):
+            self._replace_param_with_raw_if_needed()
 
         if not force_sync and self.ddp_config.overlap_param_gather:
             # All-gather the first bucket before the forward pass.
             if self.ddp_config.fsdp_all_gather_in_start_param_sync:
                 first_param = list(self.module.parameters())[0]
-                self.all_gather_and_wait_parameters_ready(
-                    params=[first_param], prefetch=True, wait_bucket_ready=False
-                )
+                with torch.autograd.profiler.record_function(
+                    "M-FSDP start_param_sync first bucket gather"
+                ):
+                    self.all_gather_and_wait_parameters_ready(
+                        params=[first_param], prefetch=True, wait_bucket_ready=False
+                    )
         else:
-            self.synchronize_param_gather()
+            with torch.autograd.profiler.record_function("M-FSDP start_param_sync sync gather"):
+                self.synchronize_param_gather()
             for bucket_id in range(self.all_gather_pipeline.num_buckets):
-                self.all_gather_pipeline.async_bucket_gather(bucket_id=bucket_id, bwd=False)
+                with torch.autograd.profiler.record_function(
+                    "M-FSDP start_param_sync bucket gather"
+                ):
+                    self.all_gather_pipeline.async_bucket_gather(bucket_id=bucket_id, bwd=False)
                 group = self.param_and_grad_buffer.parameter_groups[bucket_id]
                 if group.model_weight_buffer is None:
                     continue
@@ -1260,10 +1268,14 @@ class MegatronFSDP(torch.nn.Module):
                 if group.model_weight_buffer.is_data_distributed:
                     # If model weight is sharded, we wait for the all-gather to complete and
                     # then release the bucket immediately to save memory usage.
-                    self.all_gather_pipeline.wait_bucket_ready(bucket_id, False)
+                    with torch.autograd.profiler.record_function(
+                        "M-FSDP start_param_sync bucket wait"
+                    ):
+                        self.all_gather_pipeline.wait_bucket_ready(bucket_id, False)
 
             for bucket_id in range(self.all_gather_pipeline.num_buckets):
-                self.all_gather_pipeline.wait_bucket_ready(bucket_id, False)
+                with torch.autograd.profiler.record_function("M-FSDP start_param_sync final wait"):
+                    self.all_gather_pipeline.wait_bucket_ready(bucket_id, False)
 
     def start_grad_sync(self, *unused):
         """
@@ -1286,8 +1298,12 @@ class MegatronFSDP(torch.nn.Module):
         """
         Synchronize parameter all-gather operations for all model parameters.
         """
-        self.all_gather_pipeline.reset()
-        self._replace_param_with_distributed_if_needed()
+        with torch.autograd.profiler.record_function("M-FSDP synchronize_param_gather reset"):
+            self.all_gather_pipeline.reset()
+        with torch.autograd.profiler.record_function(
+            "M-FSDP synchronize_param_gather replace distributed"
+        ):
+            self._replace_param_with_distributed_if_needed()
 
     def synchronize_gradient_reduce(self):
         """
@@ -1428,7 +1444,8 @@ class MegatronFSDP(torch.nn.Module):
         Copies optimized parameter values into the model training parameters
         managed by Megatron-FSDP. Should be called after the optimizer.step().
         """
-        self.param_and_grad_buffer.copy_main_weights_to_model_weights()
+        with torch.autograd.profiler.record_function("M-FSDP install optimized model weights"):
+            self.param_and_grad_buffer.copy_main_weights_to_model_weights()
 
     def broadcast_params(self):
         """

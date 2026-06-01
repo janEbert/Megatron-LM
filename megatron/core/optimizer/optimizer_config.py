@@ -285,6 +285,9 @@ class OptimizerConfig:
     muon_extra_scale_factor: float = 1.0
     """Additional scale factor for the muon update."""
 
+    muon_use_syrk: bool = False
+    """If true, use the Triton SYRK Newton-Schulz kernels when supported."""
+
     muon_scalar_optimizer: str = 'adam'
     """Optimizer for nonlinear parameters (embeddings, biases, norms) when using muon.
     One of 'adam' or 'lion'. Defaults to 'adam'."""
@@ -321,9 +324,72 @@ class OptimizerConfig:
     copy.
     """
 
+    muon_fsdp_boundary_gather_dtype: str = 'fp32'
+    """Communication dtype for Muon+M-FSDP boundary pre-NS all-gathers. Valid values are
+    'fp32' and 'bf16'. The gathered tensor is converted back to the local pre-NS dtype before
+    Newton-Schulz.
+    """
+
+    muon_fsdp_distributed_ns: bool = False
+    """If True, use distributed Newton-Schulz over eligible FSDP row shards instead of gathering
+    the full Muon update first.
+    """
+
+    muon_fsdp_distributed_ns_min_numel: int = 0
+    """Minimum full parameter numel required to use Muon+M-FSDP distributed Newton-Schulz.
+    A value of 0 applies distributed NS to every eligible boundary parameter when enabled.
+    """
+
+    muon_fsdp_distributed_ns_small_col_dim: int = 0
+    """When positive, also use distributed Newton-Schulz for eligible row-sharded boundary
+    parameters whose column dimension is at most this value, even if they are below
+    muon_fsdp_distributed_ns_min_numel.
+    """
+
+    muon_fsdp_distributed_ns_single_all_reduce: bool = False
+    """If True, use a one-all-reduce Gram recurrence for eligible Muon+M-FSDP distributed
+    Newton-Schulz chunks.
+    """
+
+    muon_fsdp_distributed_ns_gram_refresh_interval: int = 1
+    """Refresh the distributed Newton-Schulz Gram all-reduce every N steps. A value of 1
+    preserves the exact per-step all-reduce path.
+    """
+
+    muon_fsdp_distributed_ns_exclude_qkv: bool = False
+    """If True, keep split-QKV tensors on the boundary all-gather path even when their
+    shape and size would otherwise be eligible for distributed Newton-Schulz.
+    """
+
+    muon_fsdp_defer_distributed_ns_under_gather: bool = False
+    """If True, do not run distributed Newton-Schulz while overlapped Muon+M-FSDP
+    boundary all-gathers are pending.
+    """
+
     muon_fsdp_overlap_comm_compute: bool = False
     """If True, overlap Muon+M-FSDP boundary all-gathers with local Newton-Schulz/update work.
     Requires batched all-gather to take effect. Defaults to False.
+    """
+
+    muon_fsdp_overlap_defer_boundary_batch_size: int = 1
+    """Minimum same-key completed Muon+M-FSDP boundary updates to collect before applying
+    them during overlap. A value of 1 applies completed boundary updates immediately.
+    """
+
+    muon_fsdp_batched_newton_schulz: bool = False
+    """If True, batch same-shaped Muon+M-FSDP Newton-Schulz updates to reduce small-kernel
+    launch overhead. Defaults to False.
+    """
+
+    muon_fsdp_batched_newton_schulz_max_numel: int = 16 * 1024 * 1024
+    """Maximum elements in one pre-NS tensor eligible for batched Muon+M-FSDP Newton-Schulz."""
+
+    muon_fsdp_batched_newton_schulz_max_batch_bytes: int = 2 * 1024 * 1024 * 1024
+    """Approximate maximum input bytes per batched Muon+M-FSDP Newton-Schulz chunk."""
+
+    muon_fsdp_batched_distributed_newton_schulz_max_batch_bytes: int = 0
+    """Approximate maximum Gram bytes per batched distributed Muon+M-FSDP Newton-Schulz
+    chunk. A value of 0 reuses muon_fsdp_batched_newton_schulz_max_batch_bytes.
     """
 
     # Lion.
@@ -453,9 +519,10 @@ class OptimizerConfig:
                 )
 
         if self.use_precision_aware_optimizer:
-            assert (
-                self.optimizer == 'adam'
-            ), '--use-precision-aware-optimizer only supported with adam'
+            assert self.optimizer in (
+                'adam',
+                'muon',
+            ), '--use-precision-aware-optimizer only supported with adam or muon'
             assert (
                 self.use_distributed_optimizer
             ), '--use-precision-aware-optimizer only supported with distributed optimizer'
