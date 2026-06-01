@@ -21,6 +21,7 @@ import gc
 import inspect
 import logging
 import math
+import os
 import traceback
 import warnings
 from collections import defaultdict, namedtuple
@@ -2908,6 +2909,8 @@ class ParamAndGradBuffer:
                             "partition_stride",
                             "is_embedding_or_output_parameter",
                             "is_embedding_parameter",
+                            "is_qkv",
+                            "megatron_fsdp_param_name",
                             "_tensor_parallel_mode",
                         ]:
                             if hasattr(orig_param, attr_name):
@@ -2922,6 +2925,11 @@ class ParamAndGradBuffer:
                 )
                 setattr(dist_param, "orig_param", orig_param)
                 setattr(dist_param, "megatron_fsdp_dist_index", self.dist_index)
+                setattr(dist_param, "megatron_fsdp_param_name", param_name)
+                setattr(orig_param, "megatron_fsdp_param_name", param_name)
+                if "linear_qkv.weight" in param_name and len(dist_param.shape) == 2:
+                    setattr(dist_param, "is_qkv", True)
+                    setattr(orig_param, "is_qkv", True)
 
                 # NOTE: megatron_fsdp_slice is used to solve the SwiGLU TP dist-ckpt problem in
                 # MCore.
@@ -2931,6 +2939,9 @@ class ParamAndGradBuffer:
                     setattr(dist_param, "megatron_fsdp_slice", slice(_start, _end))
 
                 dist_param.reset_attribute()
+                setattr(dist_param, "megatron_fsdp_param_name", param_name)
+                if "linear_qkv.weight" in param_name and len(dist_param.shape) == 2:
+                    setattr(dist_param, "is_qkv", True)
                 named_parameters.append((param_name, dist_param))
 
         return named_parameters
@@ -3023,19 +3034,26 @@ class ParamAndGradBuffer:
         def _fp8_quantize_params(dense_param_quantize_kwargs, expert_param_quantize_kwargs):
             if len(dense_param_quantize_kwargs["model_params"]) > 0:
                 # If we have FP8 parameters, we need to quantize them.
-                fp8_quantize(data_parallel_group=data_parallel_group, **dense_param_quantize_kwargs)
+                with torch.autograd.profiler.record_function("M-FSDP FP8 quantize dense"):
+                    fp8_quantize(
+                        data_parallel_group=data_parallel_group, **dense_param_quantize_kwargs
+                    )
 
             if len(expert_param_quantize_kwargs["model_params"]) > 0:
                 # If we have FP8 expert parameters, we need to quantize them.
-                fp8_quantize(
-                    data_parallel_group=expert_data_parallel_group, **expert_param_quantize_kwargs
-                )
+                with torch.autograd.profiler.record_function("M-FSDP FP8 quantize expert"):
+                    fp8_quantize(
+                        data_parallel_group=expert_data_parallel_group,
+                        **expert_param_quantize_kwargs,
+                    )
 
             clear_quantize_kwargs(dense_param_quantize_kwargs)
             clear_quantize_kwargs(expert_param_quantize_kwargs)
 
         # Special handling of blockwise FP8
-        BATCH_QUANT_MEMORY_LIMIT_BYTES = 5 * 1024**3  # 5 GB
+        BATCH_QUANT_MEMORY_LIMIT_BYTES = int(
+            os.environ.get("MFS_DP_FP8_QUANT_BATCH_BYTES", str(5 * 1024**3))
+        )
         blockwise_fp8_weight_buffers = []
         blockwise_fp8_param_buffers = []
 
@@ -3046,15 +3064,21 @@ class ParamAndGradBuffer:
                 return
 
             # Copy original param shards into their blockwise FP8 working buffers
-            for bufs in blockwise_fp8_param_buffers:
-                bufs["bucket_param"].copy_(bufs["param"])
+            with torch.autograd.profiler.record_function(
+                "M-FSDP blockwise FP8 copy shard to bucket"
+            ):
+                for bufs in blockwise_fp8_param_buffers:
+                    bufs["bucket_param"].copy_(bufs["param"])
 
             # Apply FP8 quantization to blockwise FP8 parameters
             _fp8_quantize_params(dense_param_quantize_kwargs, expert_param_quantize_kwargs)
 
             # Copy quantized params back from working buffers to original param tensors
-            for bufs in blockwise_fp8_param_buffers:
-                bufs["param"].copy_(bufs["bucket_param"])
+            with torch.autograd.profiler.record_function(
+                "M-FSDP blockwise FP8 copy bucket to shard"
+            ):
+                for bufs in blockwise_fp8_param_buffers:
+                    bufs["param"].copy_(bufs["bucket_param"])
             blockwise_fp8_param_buffers.clear()
 
             # Free bucket storage for blockwise FP8 weight buffers
@@ -3062,110 +3086,111 @@ class ParamAndGradBuffer:
                 wbuf.free_bucket_storage()
             blockwise_fp8_weight_buffers.clear()
 
-        for pg in self.parameter_groups:
-            mbuf = pg.main_weight_buffer
-            wbuf = pg.model_weight_buffer
-            tbuf = pg.transpose_weight_buffer
-            if mbuf is None:
-                continue
+        with torch.autograd.profiler.record_function("M-FSDP copy main weights to model weights"):
+            for pg in self.parameter_groups:
+                mbuf = pg.main_weight_buffer
+                wbuf = pg.model_weight_buffer
+                tbuf = pg.transpose_weight_buffer
+                if mbuf is None:
+                    continue
 
-            if pg.is_expert_param:
-                quantize_func_kwargs = expert_param_quantize_kwargs
-                expert_data_parallel_group = mbuf.data_parallel_group
-            else:
-                quantize_func_kwargs = dense_param_quantize_kwargs
-                data_parallel_group = mbuf.data_parallel_group
-
-            fp8_params = quantize_func_kwargs["model_params"]
-            shard_fp32_from_fp8 = quantize_func_kwargs["main_params"]
-            shard_offsets_in_fp8 = quantize_func_kwargs["start_offsets"]
-            shard_model_params = quantize_func_kwargs["fsdp_shard_model_params"]
-
-            has_blockwise_fp8_param = False
-            for param in pg.params:
-                item_id = mbuf.param_idx[param]
-                if wbuf:
-                    if wbuf.is_data_distributed or mbuf.is_data_distributed:
-                        model_param = wbuf.get_item(item_id, only_shard=True)
-                        if tbuf:
-                            transpose_param = tbuf.get_item(item_id, only_shard=True)
-                        else:
-                            transpose_param = None
-                        main_weight = mbuf.get_item(item_id, only_shard=True)
-                    else:
-                        model_param = wbuf.get_item(item_id)
-                        if tbuf:
-                            transpose_param = tbuf.get_item(item_id)
-                        else:
-                            transpose_param = None
-                        main_weight = mbuf.get_item(item_id)
+                if pg.is_expert_param:
+                    quantize_func_kwargs = expert_param_quantize_kwargs
+                    expert_data_parallel_group = mbuf.data_parallel_group
                 else:
-                    assert not mbuf.is_data_distributed
-                    model_param = to_local_if_dtensor(param)
-                    main_weight = mbuf.get_item(item_id)
+                    quantize_func_kwargs = dense_param_quantize_kwargs
+                    data_parallel_group = mbuf.data_parallel_group
 
-                # TODO(@kunlunl, @cspades): Currently, we only support FP8 parameters
-                # for FSDP, i.e. fully-sharded compute parameters with a high-precision
-                # main weight buffer. Would it be possible to add if branches here to
-                # quantize the original param (no_shard) or wbuf data (optim, optim_grads)
-                # for a seamless user experience and coverage for ZeRO-1 and ZeRO-2?
+                fp8_params = quantize_func_kwargs["model_params"]
+                shard_fp32_from_fp8 = quantize_func_kwargs["main_params"]
+                shard_offsets_in_fp8 = quantize_func_kwargs["start_offsets"]
+                shard_model_params = quantize_func_kwargs["fsdp_shard_model_params"]
 
-                if is_blockwise_float8tensor(param):
-                    fp8_params.append(param)
-                    if model_param.numel() == 0:
-                        # Empty parameter.
-                        shard_fp32_from_fp8.append(None)
-                        shard_offsets_in_fp8.append(None)
-                        shard_model_params.append([None, None])
+                has_blockwise_fp8_param = False
+                for param in pg.params:
+                    item_id = mbuf.param_idx[param]
+                    if wbuf:
+                        if wbuf.is_data_distributed or mbuf.is_data_distributed:
+                            model_param = wbuf.get_item(item_id, only_shard=True)
+                            if tbuf:
+                                transpose_param = tbuf.get_item(item_id, only_shard=True)
+                            else:
+                                transpose_param = None
+                            main_weight = mbuf.get_item(item_id, only_shard=True)
+                        else:
+                            model_param = wbuf.get_item(item_id)
+                            if tbuf:
+                                transpose_param = tbuf.get_item(item_id)
+                            else:
+                                transpose_param = None
+                            main_weight = mbuf.get_item(item_id)
                     else:
-                        shard_fp32_from_fp8.append(main_weight)
-                        shard_offsets_in_fp8.append(wbuf.locate_item_in_global_item(item_id)[0])
-                        bucket = wbuf.fetch_bucket()
-                        b_model_param = wbuf.get_item_from_bucket(bucket, item_id)[
-                            slice(*wbuf.locate_item_in_global_item(item_id))
-                        ]
-                        assert (
-                            transpose_param is None
-                        ), "Blockwise FP8 does not support transpose param."
-                        shard_model_params.append([b_model_param, None])
-                        assert b_model_param.numel() == model_param.numel(), (
-                            f"Blockwise FP8 bucket param numel {b_model_param.numel()} does"
-                            f" not match model param numel {model_param.numel()}"
-                            f" name: {self.param_to_name[param]}"
+                        assert not mbuf.is_data_distributed
+                        model_param = to_local_if_dtensor(param)
+                        main_weight = mbuf.get_item(item_id)
+
+                    # TODO(@kunlunl, @cspades): Currently, we only support FP8 parameters
+                    # for FSDP, i.e. fully-sharded compute parameters with a high-precision
+                    # main weight buffer. Would it be possible to add if branches here to
+                    # quantize the original param (no_shard) or wbuf data (optim, optim_grads)
+                    # for a seamless user experience and coverage for ZeRO-1 and ZeRO-2?
+
+                    if is_blockwise_float8tensor(param):
+                        fp8_params.append(param)
+                        if model_param.numel() == 0:
+                            # Empty parameter.
+                            shard_fp32_from_fp8.append(None)
+                            shard_offsets_in_fp8.append(None)
+                            shard_model_params.append([None, None])
+                        else:
+                            shard_fp32_from_fp8.append(main_weight)
+                            shard_offsets_in_fp8.append(wbuf.locate_item_in_global_item(item_id)[0])
+                            bucket = wbuf.fetch_bucket()
+                            b_model_param = wbuf.get_item_from_bucket(bucket, item_id)[
+                                slice(*wbuf.locate_item_in_global_item(item_id))
+                            ]
+                            assert (
+                                transpose_param is None
+                            ), "Blockwise FP8 does not support transpose param."
+                            shard_model_params.append([b_model_param, None])
+                            assert b_model_param.numel() == model_param.numel(), (
+                                f"Blockwise FP8 bucket param numel {b_model_param.numel()} does"
+                                f" not match model param numel {model_param.numel()}"
+                                f" name: {self.param_to_name[param]}"
+                            )
+                            blockwise_fp8_param_buffers.append(
+                                {"bucket_param": b_model_param, "param": model_param}
+                            )
+                            has_blockwise_fp8_param = True
+                        continue
+
+                    if is_float8tensor(param):
+                        fp8_params.append(param)
+                        if model_param.numel() == 0:
+                            # Empty parameter.
+                            shard_fp32_from_fp8.append(None)
+                            shard_offsets_in_fp8.append(None)
+                            shard_model_params.append([None, None])
+                        else:
+                            shard_fp32_from_fp8.append(main_weight)
+                            shard_offsets_in_fp8.append(wbuf.locate_item_in_global_item(item_id)[0])
+                            shard_model_params.append([model_param, transpose_param])
+                        continue
+
+                    if model_param.numel() > 0:
+                        model_param.data.copy_(main_weight.view(model_param.shape))
+
+                if has_blockwise_fp8_param:
+                    blockwise_fp8_weight_buffers.append(wbuf)
+                    if (
+                        sum([wbuf.bucket_index.size for wbuf in blockwise_fp8_weight_buffers])
+                        > BATCH_QUANT_MEMORY_LIMIT_BYTES
+                    ):
+                        _batch_quantize_blockwise_fp8_params(
+                            dense_param_quantize_kwargs,
+                            expert_param_quantize_kwargs,
+                            blockwise_fp8_param_buffers,
                         )
-                        blockwise_fp8_param_buffers.append(
-                            {"bucket_param": b_model_param, "param": model_param}
-                        )
-                        has_blockwise_fp8_param = True
-                    continue
-
-                if is_float8tensor(param):
-                    fp8_params.append(param)
-                    if model_param.numel() == 0:
-                        # Empty parameter.
-                        shard_fp32_from_fp8.append(None)
-                        shard_offsets_in_fp8.append(None)
-                        shard_model_params.append([None, None])
-                    else:
-                        shard_fp32_from_fp8.append(main_weight)
-                        shard_offsets_in_fp8.append(wbuf.locate_item_in_global_item(item_id)[0])
-                        shard_model_params.append([model_param, transpose_param])
-                    continue
-
-                if model_param.numel() > 0:
-                    model_param.data.copy_(main_weight.view(model_param.shape))
-
-            if has_blockwise_fp8_param:
-                blockwise_fp8_weight_buffers.append(wbuf)
-                if (
-                    sum([wbuf.bucket_index.size for wbuf in blockwise_fp8_weight_buffers])
-                    > BATCH_QUANT_MEMORY_LIMIT_BYTES
-                ):
-                    _batch_quantize_blockwise_fp8_params(
-                        dense_param_quantize_kwargs,
-                        expert_param_quantize_kwargs,
-                        blockwise_fp8_param_buffers,
-                    )
 
         _batch_quantize_blockwise_fp8_params(
             dense_param_quantize_kwargs, expert_param_quantize_kwargs, blockwise_fp8_param_buffers
