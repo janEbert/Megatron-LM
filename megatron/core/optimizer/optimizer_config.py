@@ -530,6 +530,12 @@ class OptimizerConfig:
     chunk. A value of 0 reuses muon_fsdp_batched_newton_schulz_max_batch_bytes.
     """
 
+    muon_fsdp_foreach_pre_ns: bool = False
+    """If True, compute Muon+M-FSDP local pre-Newton-Schulz momentum/Nesterov
+    tensors with torch foreach elementwise kernels when the common decoupled
+    weight-decay path is eligible. Defaults to False.
+    """
+
     muon_fsdp_foreach_weight_update: bool = False
     """If True, apply batched Muon+M-FSDP local/distributed weight updates with torch foreach
     kernels when the updates share dtype, shape, and learning rate. Defaults to False.
