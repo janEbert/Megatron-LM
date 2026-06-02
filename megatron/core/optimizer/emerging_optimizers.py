@@ -583,6 +583,12 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self._fsdp_boundary_layout_summary_logged = False
         self._fsdp_batched_ns_summary_logged_modes: set[str] = set()
         super().__init__(params, **kwargs)
+        self._fsdp_weight_update_hooks_are_noop = (
+            type(self).pre_weight_update_fn_inplace
+            is OrthogonalizedOptimizer.pre_weight_update_fn_inplace
+            and type(self).post_weight_update_fn_inplace
+            is OrthogonalizedOptimizer.post_weight_update_fn_inplace
+        )
 
     def _fsdp_diagnostic_rank_info(self) -> tuple[int | None, int | None]:
         if not torch.distributed.is_available() or not torch.distributed.is_initialized():
@@ -2690,9 +2696,12 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             local_update = self._local_shard_from_full_update_like(p, orth_update)
         else:
             local_update = orth_update.to(dtype=p._local_tensor.dtype)
-        self.pre_weight_update_fn_inplace(p._local_tensor, local_update)
-        p._local_tensor.add_(local_update, alpha=-lr)
-        self.post_weight_update_fn_inplace(p._local_tensor)
+        if self._fsdp_weight_update_hooks_are_noop:
+            p._local_tensor.add_(local_update, alpha=-lr)
+        else:
+            self.pre_weight_update_fn_inplace(p._local_tensor, local_update)
+            p._local_tensor.add_(local_update, alpha=-lr)
+            self.post_weight_update_fn_inplace(p._local_tensor)
 
     def _try_apply_orthogonal_muon_update_foreach(
         self, chunk: list, orth_updates: torch.Tensor
@@ -2738,11 +2747,13 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         with torch.autograd.profiler.record_function(
             f"Muon-FSDP foreach weight update count={len(chunk)}"
         ):
-            for param_tensor, update_tensor in zip(param_tensors, update_tensors):
-                self.pre_weight_update_fn_inplace(param_tensor, update_tensor)
+            if not self._fsdp_weight_update_hooks_are_noop:
+                for param_tensor, update_tensor in zip(param_tensors, update_tensors):
+                    self.pre_weight_update_fn_inplace(param_tensor, update_tensor)
             torch._foreach_add_(param_tensors, update_tensors, alpha=-first_lr)
-            for param_tensor in param_tensors:
-                self.post_weight_update_fn_inplace(param_tensor)
+            if not self._fsdp_weight_update_hooks_are_noop:
+                for param_tensor in param_tensors:
+                    self.post_weight_update_fn_inplace(param_tensor)
         return True
 
     def _apply_batched_qkv_muon_updates(
