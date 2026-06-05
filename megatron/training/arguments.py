@@ -2415,6 +2415,52 @@ def _add_regularization_args(parser):
                        'the local momentum dtype. This preserves optimizer math and '
                        'removes per-item pre-NS materialization plus the stage-0 '
                        'pack copy for eligible gathers. Defaults to false.')
+    group.add_argument('--muon-fsdp-boundary-pre-ns-pack-stream',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='For exact direct Muon+M-FSDP boundary pre-Newton-Schulz '
+                       'packing, use a separate CUDA stream and make the all-gather '
+                       'stream wait on a per-batch ready event. This preserves '
+                       'optimizer math while allowing later packs to overlap earlier '
+                       'all-gathers. Defaults to false.')
+    group.add_argument('--muon-fsdp-boundary-gather-direct-batched-ns',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='For eligible completed Muon+M-FSDP boundary gathers, '
+                       'compact directly into the batched Newton-Schulz input stack '
+                       'instead of materializing per-item full tensors before stacking. '
+                       'Preserves exact gathered Muon math. Defaults to false.')
+    group.add_argument('--muon-fsdp-boundary-owner-compute-scatter',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='For eligible exact Muon+M-FSDP boundary updates, route '
+                       'pre-Newton-Schulz shards to deterministic owner ranks, compute '
+                       'the same full-matrix Newton-Schulz update once on the owner, '
+                       'and scatter exact local update slices back. Defaults to false.')
+    group.add_argument('--muon-fsdp-owner-compute-scatter-single-batch',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='For exact owner-compute/scatter updates, avoid splitting '
+                       'owner chunks by the regular boundary gather byte cap. This '
+                       'reduces serial all-to-all chunk count at the cost of larger '
+                       'temporary owner buffers. Defaults to false.')
+    group.add_argument('--muon-fsdp-owner-compute-scatter-async-gather',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='For exact owner-compute/scatter updates, launch owner '
+                       'all-to-all gathers asynchronously on duplicate FSDP '
+                       'communicators before local Newton-Schulz drains the regular '
+                       'boundary gather pipeline. Owner full-NS compute and scatter '
+                       'still run in the deferred owner phase. Defaults to false.')
+    group.add_argument('--muon-fsdp-owner-compute-scatter-async-scatter',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='For exact owner-compute/scatter updates, launch shard-return '
+                       'all-to-alls asynchronously after each owner chunk full '
+                       'Newton-Schulz compute, then apply returned shards after all '
+                       'chunk scatters are queued. This preserves update math and '
+                       'overlaps scatter for one chunk with compute for the next. '
+                       'Defaults to false.')
     group.add_argument('--muon-fsdp-boundary-batch-sort-by-size',
                        action=argparse.BooleanOptionalAction,
                        default=False,
@@ -2568,6 +2614,24 @@ def _add_regularization_args(parser):
                        'communication stream and wait only when the norm ratios are '
                        'needed. This preserves the scaling formula and only changes '
                        'stream scheduling. Defaults to false.')
+    group.add_argument('--muon-fsdp-approx-local-boundary-threaded-norm-all-reduce',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='When approximate local-boundary global-norm scaling is '
+                       'enabled, launch norm reductions from a background host thread '
+                       'on the Muon FSDP communication stream. This preserves the '
+                       'scaling formula and attempts to overlap Python/NCCL launch '
+                       'and reduction time with local Newton-Schulz work. Defaults '
+                       'to false.')
+    group.add_argument('--muon-fsdp-approx-local-boundary-defer-norm-scaled-apply',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='When approximate local-boundary global-norm scaling is '
+                       'enabled, compute batched local-boundary Newton-Schulz '
+                       'outputs before waiting for async norm ratios, then apply '
+                       'the same norm-scaled updates after the ratios are ready. '
+                       'This preserves the norm-ratio formula and only changes '
+                       'scheduling/lifetimes. Defaults to false.')
     group.add_argument('--muon-fsdp-batched-qkv-local-boundary',
                        action=argparse.BooleanOptionalAction,
                        default=False,
@@ -2575,6 +2639,14 @@ def _add_regularization_args(parser):
                        'path to use batched split-QKV Newton-Schulz when their local '
                        'shard layout is eligible. This is opt-in because boundary QKV '
                        'shards may not be aligned to full QKV split groups. Defaults '
+                       'to false.')
+    group.add_argument('--muon-fsdp-batched-unsplit-qkv-local-boundary',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='Allow split-QKV tensors on the approximate local-boundary '
+                       'path to use the ordinary batched Newton-Schulz path as full '
+                       'unsplit matrices. This preserves the current full-matrix QKV '
+                       'update while reducing individual QKV kernel launches. Defaults '
                        'to false.')
     group.add_argument('--muon-fsdp-overlap-local-ns-first',
                        action=argparse.BooleanOptionalAction,
@@ -2609,6 +2681,14 @@ def _add_regularization_args(parser):
                        'This keeps the initial prefetch depth conservative while '
                        'letting the boundary drain loop queue more communication. '
                        'Default: 0.')
+    group.add_argument('--muon-fsdp-overlap-boundary-start-next-before-reconstruct',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='After a boundary gather collective completes, launch the '
+                       'next boundary gather into a spare scratch slot before '
+                       'reconstructing and processing the completed batch. This '
+                       'preserves optimizer math and trades one extra scratch slot for '
+                       'more communication/reconstruct overlap. Defaults to false.')
     group.add_argument('--muon-fsdp-overlap-boundary-progress-during-local',
                        action=argparse.BooleanOptionalAction,
                        default=False,
@@ -2616,6 +2696,14 @@ def _add_regularization_args(parser):
                        'batched local Newton-Schulz chunks and launch the next gather when '
                        'it has completed. Preserves optimizer math; only changes scheduling. '
                        'Defaults to false.')
+    group.add_argument('--muon-fsdp-overlap-boundary-blocking-progress-interval',
+                       type=int,
+                       default=0,
+                       help='If greater than zero, force-complete the oldest queued '
+                       'Muon+M-FSDP boundary gather after this many batched Newton-Schulz '
+                       'progress points while local/distributed work runs under the gather. '
+                       'All ranks progress the same gather order, preserving optimizer math '
+                       'and collective ordering. Default: 0.')
     group.add_argument('--muon-fsdp-overlap-defer-boundary-batch-size',
                        type=int,
                        default=1,
@@ -2639,6 +2727,12 @@ def _add_regularization_args(parser):
                        help='Approximate maximum Gram bytes per batched distributed '
                        'Muon+M-FSDP Newton-Schulz chunk. A value of 0 reuses '
                        '--muon-fsdp-batched-newton-schulz-max-batch-bytes. Default: 0.')
+    group.add_argument('--muon-fsdp-reuse-batched-newton-schulz-workspace',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='Reuse scratch tensors for batched Muon+M-FSDP '
+                       'Newton-Schulz stack inputs. Preserves optimizer math and '
+                       'only changes temporary allocation reuse. Defaults to false.')
     group.add_argument('--muon-fsdp-defer-local-pre-ns-to-batched-ns',
                        action=argparse.BooleanOptionalAction,
                        default=False,
