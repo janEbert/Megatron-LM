@@ -7920,6 +7920,62 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             self._flatten_tensor_for_uneven_gather(item_local_tensor)
             for _, item_local_tensor in items
         ]
+        if batch["device"].type == "cuda" and stage_count > 1:
+            pending_stages = []
+            final_stage_idx = stage_count - 1
+            with torch.autograd.profiler.record_function(
+                f"Muon-FSDP async batched partial multi-stage gather start count={len(items)}"
+            ):
+                with torch.cuda.device(batch["device"]):
+                    comm_stream = self._get_fsdp_comm_stream(batch["device"])
+                    comm_stream.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(comm_stream):
+                        for stage_idx, stage in enumerate(plans[0]["stages"]):
+                            if (
+                                self.fsdp_fused_async_gather_repack
+                                and stage_idx > 0
+                                and pending_stages
+                            ):
+                                stage_state = (
+                                    self._prepare_uneven_gather_stage_from_previous_pending(
+                                        pending_stages[-1],
+                                        plans,
+                                        batch,
+                                        stage_idx,
+                                        stage,
+                                        wait_for_previous=False,
+                                    )
+                                )
+                            else:
+                                stage_state = self._prepare_uneven_gather_stage(
+                                    current_buffers, plans, batch, stage_idx, stage
+                                )
+                            pending_stage = self._issue_uneven_gather_stage(
+                                stage_state, async_op=True, comm_stream=comm_stream
+                            )
+                            pending_stages.append(pending_stage)
+                            if stage_idx == final_stage_idx:
+                                break
+                            if not self._block_current_stream_on_uneven_gather_stage(pending_stage):
+                                if stage_idx == 0:
+                                    return {
+                                        "plans": plans,
+                                        "batch": batch,
+                                        "pending_stage": pending_stage,
+                                    }
+                                raise AssertionError(
+                                    "Muon+M-FSDP async partial multi-stage gather requires "
+                                    "torch.distributed.Work.block_current_stream()."
+                                )
+                            if not self.fsdp_fused_async_gather_repack:
+                                current_buffers = self._unpack_uneven_gather_stage(pending_stage)
+            return {
+                "plans": plans,
+                "batch": batch,
+                "pending_stages": pending_stages[:-1],
+                "final_pending_stage": pending_stages[-1],
+            }
+
         with torch.autograd.profiler.record_function(
             f"Muon-FSDP async batched partial gather start count={len(items)}"
         ):
@@ -7939,6 +7995,18 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         batch = pending["batch"]
         stage_count = self._validate_batched_partial_gather_plans(plans)
         final_stage_idx = stage_count - 1
+
+        if "final_pending_stage" in pending:
+            for pending_stage in pending["pending_stages"]:
+                self._wait_uneven_gather_stage(pending_stage)
+            final_pending_stage = pending["final_pending_stage"]
+            self._wait_uneven_gather_stage(final_pending_stage)
+            return [
+                self._reconstruct_partial_tensor_from_final_stage_buffers(
+                    plan, final_pending_stage, batch_item_idx=batch_item_idx
+                )
+                for batch_item_idx, plan in enumerate(plans)
+            ]
 
         if final_stage_idx == 0:
             self._wait_uneven_gather_stage(pending["pending_stage"])
