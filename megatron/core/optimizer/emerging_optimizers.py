@@ -435,6 +435,12 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_padded_all_gather_zero_pad: bool = True,
         fsdp_fused_async_gather_repack: bool = False,
         fsdp_boundary_pre_ns_into_gather_buffer: bool = False,
+        fsdp_boundary_pre_ns_pack_stream: bool = False,
+        fsdp_boundary_gather_direct_batched_ns: bool = False,
+        fsdp_boundary_owner_compute_scatter: bool = False,
+        fsdp_owner_compute_scatter_single_batch: bool = False,
+        fsdp_owner_compute_scatter_async_gather: bool = False,
+        fsdp_owner_compute_scatter_async_scatter: bool = False,
         fsdp_boundary_batch_sort_by_size: bool = False,
         fsdp_fast_reconstruct: bool = True,
         fsdp_boundary_gather_dtype: str = "fp32",
@@ -459,18 +465,24 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_approx_local_boundary_foreach_norm: bool = False,
         fsdp_approx_local_boundary_flat_norm_all_reduce: bool = False,
         fsdp_approx_local_boundary_async_norm_all_reduce: bool = False,
+        fsdp_approx_local_boundary_threaded_norm_all_reduce: bool = False,
+        fsdp_approx_local_boundary_defer_norm_scaled_apply: bool = False,
         fsdp_batched_qkv_local_boundary: bool = False,
+        fsdp_batched_unsplit_qkv_local_boundary: bool = False,
         fsdp_overlap_local_ns_first: bool = False,
         fsdp_overlap_comm_compute: bool = False,
         fsdp_overlap_boundary_ready_event: bool = False,
         fsdp_overlap_boundary_prefetch_batches: int = 1,
         fsdp_overlap_boundary_post_compute_prefetch_batches: int = 0,
+        fsdp_overlap_boundary_start_next_before_reconstruct: bool = False,
         fsdp_overlap_boundary_progress_during_local: bool = False,
+        fsdp_overlap_boundary_blocking_progress_interval: int = 0,
         fsdp_overlap_defer_boundary_batch_size: int = 1,
         fsdp_batched_newton_schulz: bool = False,
         fsdp_batched_newton_schulz_max_numel: int = 16 * 1024 * 1024,
         fsdp_batched_newton_schulz_max_batch_bytes: int = 2 * 1024 * 1024 * 1024,
         fsdp_batched_distributed_newton_schulz_max_batch_bytes: int = 0,
+        fsdp_reuse_batched_newton_schulz_workspace: bool = False,
         fsdp_defer_local_pre_ns_to_batched_ns: bool = False,
         fsdp_foreach_pre_ns: bool = False,
         fsdp_foreach_weight_update: bool = False,
@@ -494,6 +506,12 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.fsdp_padded_all_gather_zero_pad = fsdp_padded_all_gather_zero_pad
         self.fsdp_fused_async_gather_repack = fsdp_fused_async_gather_repack
         self.fsdp_boundary_pre_ns_into_gather_buffer = fsdp_boundary_pre_ns_into_gather_buffer
+        self.fsdp_boundary_pre_ns_pack_stream = fsdp_boundary_pre_ns_pack_stream
+        self.fsdp_boundary_gather_direct_batched_ns = fsdp_boundary_gather_direct_batched_ns
+        self.fsdp_boundary_owner_compute_scatter = fsdp_boundary_owner_compute_scatter
+        self.fsdp_owner_compute_scatter_single_batch = fsdp_owner_compute_scatter_single_batch
+        self.fsdp_owner_compute_scatter_async_gather = fsdp_owner_compute_scatter_async_gather
+        self.fsdp_owner_compute_scatter_async_scatter = fsdp_owner_compute_scatter_async_scatter
         self.fsdp_boundary_batch_sort_by_size = fsdp_boundary_batch_sort_by_size
         self.fsdp_fast_reconstruct = fsdp_fast_reconstruct
         supported_boundary_gather_dtypes = ("fp32", "bf16", "int8", "fp8_e4m3fn", "fp8_e5m2")
@@ -539,7 +557,14 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.fsdp_approx_local_boundary_async_norm_all_reduce = (
             fsdp_approx_local_boundary_async_norm_all_reduce
         )
+        self.fsdp_approx_local_boundary_threaded_norm_all_reduce = (
+            fsdp_approx_local_boundary_threaded_norm_all_reduce
+        )
+        self.fsdp_approx_local_boundary_defer_norm_scaled_apply = (
+            fsdp_approx_local_boundary_defer_norm_scaled_apply
+        )
         self.fsdp_batched_qkv_local_boundary = fsdp_batched_qkv_local_boundary
+        self.fsdp_batched_unsplit_qkv_local_boundary = fsdp_batched_unsplit_qkv_local_boundary
         self.fsdp_overlap_local_ns_first = fsdp_overlap_local_ns_first
         self.fsdp_overlap_comm_compute = fsdp_overlap_comm_compute
         self.fsdp_overlap_boundary_ready_event = fsdp_overlap_boundary_ready_event
@@ -547,8 +572,14 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.fsdp_overlap_boundary_post_compute_prefetch_batches = max(
             0, fsdp_overlap_boundary_post_compute_prefetch_batches
         )
+        self.fsdp_overlap_boundary_start_next_before_reconstruct = (
+            fsdp_overlap_boundary_start_next_before_reconstruct
+        )
         self.fsdp_overlap_boundary_progress_during_local = (
             fsdp_overlap_boundary_progress_during_local
+        )
+        self.fsdp_overlap_boundary_blocking_progress_interval = max(
+            0, fsdp_overlap_boundary_blocking_progress_interval
         )
         self.fsdp_overlap_defer_boundary_batch_size = max(1, fsdp_overlap_defer_boundary_batch_size)
         self.fsdp_batched_newton_schulz = fsdp_batched_newton_schulz
@@ -558,6 +589,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             fsdp_batched_distributed_newton_schulz_max_batch_bytes
             or fsdp_batched_newton_schulz_max_batch_bytes
         )
+        self.fsdp_reuse_batched_newton_schulz_workspace = fsdp_reuse_batched_newton_schulz_workspace
         self.fsdp_defer_local_pre_ns_to_batched_ns = fsdp_defer_local_pre_ns_to_batched_ns
         self.fsdp_foreach_pre_ns = fsdp_foreach_pre_ns
         self.fsdp_foreach_weight_update = fsdp_foreach_weight_update
@@ -572,7 +604,13 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self._fsdp_nonempty_group_cache: dict[tuple[int, ...], Any] = {}
         self._fsdp_gather_scratch_cache: dict[tuple[Any, ...], Any] = {}
         self._fsdp_gather_scratch_scope: Any = None
+        self._fsdp_batched_ns_workspace_cache: dict[tuple[Any, ...], torch.Tensor] = {}
+        self._fsdp_owner_chunk_diagnostics_logged = 0
         self._fsdp_comm_stream_cache: dict[torch.device, torch.cuda.Stream] = {}
+        self._fsdp_owner_comm_stream_cache: dict[torch.device, torch.cuda.Stream] = {}
+        self._fsdp_pack_stream_cache: dict[torch.device, torch.cuda.Stream] = {}
+        self._fsdp_owner_duplicate_group_cache: dict[tuple[int, ...], Any] = {}
+        self._fsdp_owner_duplicate_groups_initialized = False
         self._fsdp_gather_summary_logged = False
         self._fsdp_update_mode_summary_logged = False
         self._fsdp_boundary_layout_summary_logged = False
@@ -651,6 +689,93 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 cached = torch.cuda.Stream()
             self._fsdp_comm_stream_cache[device] = cached
         return cached
+
+    def _get_fsdp_pack_stream(self, device: torch.device) -> torch.cuda.Stream:
+        cached = self._fsdp_pack_stream_cache.get(device)
+        if cached is None:
+            with torch.cuda.device(device):
+                cached = torch.cuda.Stream()
+            self._fsdp_pack_stream_cache[device] = cached
+        return cached
+
+    def _get_fsdp_owner_comm_stream(self, device: torch.device) -> torch.cuda.Stream:
+        cached = self._fsdp_owner_comm_stream_cache.get(device)
+        if cached is None:
+            with torch.cuda.device(device):
+                cached = torch.cuda.Stream()
+            self._fsdp_owner_comm_stream_cache[device] = cached
+        return cached
+
+    def _ensure_fsdp_owner_duplicate_groups(
+        self, flat_groups: list[torch.distributed.ProcessGroup]
+    ) -> dict[int, torch.distributed.ProcessGroup]:
+        if self._fsdp_owner_duplicate_groups_initialized:
+            return self._cached_fsdp_owner_duplicate_groups(flat_groups)
+
+        if not flat_groups:
+            local_requests: tuple[tuple[int, ...], ...] = ()
+        else:
+            local_requests = tuple(
+                sorted(
+                    {
+                        tuple(torch.distributed.get_process_group_ranks(flat_group))
+                        for flat_group in flat_groups
+                    }
+                )
+            )
+
+        world_size = torch.distributed.get_world_size()
+        all_requests: list[tuple[tuple[int, ...], ...] | None] = [None] * world_size
+        torch.distributed.all_gather_object(
+            all_requests, local_requests, group=torch.distributed.group.WORLD
+        )
+        requested_rank_groups = sorted(
+            {
+                rank_group
+                for request in all_requests
+                if request is not None
+                for rank_group in request
+            }
+        )
+        for rank_group in requested_rank_groups:
+            if rank_group not in self._fsdp_owner_duplicate_group_cache:
+                self._fsdp_owner_duplicate_group_cache[rank_group] = torch.distributed.new_group(
+                    ranks=list(rank_group)
+                )
+
+        self._fsdp_owner_duplicate_groups_initialized = True
+        return {
+            id(flat_group): self._fsdp_owner_duplicate_group_cache[
+                tuple(torch.distributed.get_process_group_ranks(flat_group))
+            ]
+            for flat_group in flat_groups
+        }
+
+    def _cached_fsdp_owner_duplicate_groups(
+        self, flat_groups: list[torch.distributed.ProcessGroup]
+    ) -> dict[int, torch.distributed.ProcessGroup]:
+        result = {}
+        for flat_group in flat_groups:
+            rank_group = tuple(torch.distributed.get_process_group_ranks(flat_group))
+            duplicate_group = self._fsdp_owner_duplicate_group_cache.get(rank_group)
+            if duplicate_group is None:
+                raise AssertionError(
+                    "Async owner-compute/scatter duplicate group was not "
+                    f"preinitialized for ranks={rank_group}."
+                )
+            result[id(flat_group)] = duplicate_group
+        return result
+
+    def _ensure_boundary_ready_event(self, batch: dict[str, Any]) -> torch.cuda.Event | None:
+        if batch["device"].type != "cuda":
+            return None
+        ready_event = batch.get("_boundary_ready_event")
+        if ready_event is None:
+            with torch.cuda.device(batch["device"]):
+                ready_event = torch.cuda.Event()
+                torch.cuda.current_stream(batch["device"]).record_event(ready_event)
+            batch["_boundary_ready_event"] = ready_event
+        return ready_event
 
     def _get_fsdp_gather_scratch_tensor(
         self, key: tuple[Any, ...], numel: int, *, dtype: torch.dtype, device: torch.device
@@ -809,6 +934,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         stage_collectives = 0
         padded_collectives = 0
         total_gather_bytes = 0
+        cluster_planned_gather_bytes = 0
         max_gather_bytes = 0
         for batch in batches:
             element_size = batch.get("element_size")
@@ -825,6 +951,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 stage_collectives += 1
                 padded_collectives += int(use_padded)
                 total_gather_bytes += gather_bytes
+                cluster_planned_gather_bytes += gather_bytes * len(rank_total_numels)
                 max_gather_bytes = max(max_gather_bytes, gather_bytes)
                 continue
 
@@ -836,6 +963,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 stage_collectives += 1
                 padded_collectives += int(use_padded)
                 total_gather_bytes += gather_bytes
+                cluster_planned_gather_bytes += gather_bytes * len(rank_total_numels)
                 max_gather_bytes = max(max_gather_bytes, gather_bytes)
 
         if item_counts:
@@ -847,6 +975,13 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             avg_items = 0.0
         wire_element_size = (
             self._boundary_gather_wire_element_size(items[0][1].dtype) if items else 0
+        )
+        owner_full_tensor_bytes = sum(int(param.numel()) for param, _ in items) * wire_element_size
+        owner_gather_scatter_lower_bound_bytes = 2 * owner_full_tensor_bytes
+        owner_lower_bound_ratio = (
+            cluster_planned_gather_bytes / owner_gather_scatter_lower_bound_bytes
+            if owner_gather_scatter_lower_bound_bytes > 0
+            else 0.0
         )
 
         boundary_shape_counts: dict[tuple[tuple[int, ...], tuple[int, ...], torch.dtype], int] = {}
@@ -868,6 +1003,10 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"batch_items_min/avg/max={min_items}/{avg_items:.1f}/{max_items}, "
             f"collectives={stage_collectives}, padded_collectives={padded_collectives}, "
             f"total_planned_gather_gib={total_gather_bytes / (1024 ** 3):.2f}, "
+            f"cluster_planned_gather_gib={cluster_planned_gather_bytes / (1024 ** 3):.2f}, "
+            "ideal_owner_gather_scatter_gib="
+            f"{owner_gather_scatter_lower_bound_bytes / (1024 ** 3):.2f}, "
+            f"owner_lower_bound_ratio={owner_lower_bound_ratio:.2f}, "
             f"max_collective_mib={max_gather_bytes / (1024 ** 2):.1f}, "
             f"max_gather_gib={self.fsdp_batch_max_gather_bytes / (1024 ** 3):.2f}, "
             f"boundary_gather_dtype={self.fsdp_boundary_gather_dtype}, "
@@ -877,6 +1016,10 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"fused_async_repack={self.fsdp_fused_async_gather_repack}, "
             "boundary_pre_ns_into_gather_buffer="
             f"{self.fsdp_boundary_pre_ns_into_gather_buffer}, "
+            "boundary_pre_ns_pack_stream="
+            f"{self.fsdp_boundary_pre_ns_pack_stream}, "
+            "boundary_gather_direct_batched_ns="
+            f"{self.fsdp_boundary_gather_direct_batched_ns}, "
             f"batch_sort_by_size={self.fsdp_boundary_batch_sort_by_size}, "
             f"overlap={self.fsdp_overlap_comm_compute}, "
             f"overlap_local_ns_first={self.fsdp_overlap_local_ns_first}, "
@@ -884,8 +1027,12 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"prefetch_batches={self.fsdp_overlap_boundary_prefetch_batches}, "
             "post_compute_prefetch_batches="
             f"{self.fsdp_overlap_boundary_post_compute_prefetch_batches}, "
+            "start_next_before_reconstruct="
+            f"{self.fsdp_overlap_boundary_start_next_before_reconstruct}, "
             "progress_during_local="
             f"{self.fsdp_overlap_boundary_progress_during_local}, "
+            "blocking_progress_interval="
+            f"{self.fsdp_overlap_boundary_blocking_progress_interval}, "
             f"defer_boundary_batch_size={self.fsdp_overlap_defer_boundary_batch_size}, "
             f"top_boundary_shapes=[{top_boundary_shapes_text}].",
         )
@@ -920,11 +1067,41 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         if self._fsdp_update_mode_summary_logged:
             return
         self._fsdp_update_mode_summary_logged = True
-        mode_counts = {"local": 0, "gather": 0, "distributed": 0, "partial_distributed": 0}
-        mode_numels = {"local": 0, "gather": 0, "distributed": 0, "partial_distributed": 0}
-        qkv_counts = {"local": 0, "gather": 0, "distributed": 0, "partial_distributed": 0}
-        named_qkv_counts = {"local": 0, "gather": 0, "distributed": 0, "partial_distributed": 0}
-        attr_qkv_counts = {"local": 0, "gather": 0, "distributed": 0, "partial_distributed": 0}
+        mode_counts = {
+            "local": 0,
+            "gather": 0,
+            "owner": 0,
+            "distributed": 0,
+            "partial_distributed": 0,
+        }
+        mode_numels = {
+            "local": 0,
+            "gather": 0,
+            "owner": 0,
+            "distributed": 0,
+            "partial_distributed": 0,
+        }
+        qkv_counts = {
+            "local": 0,
+            "gather": 0,
+            "owner": 0,
+            "distributed": 0,
+            "partial_distributed": 0,
+        }
+        named_qkv_counts = {
+            "local": 0,
+            "gather": 0,
+            "owner": 0,
+            "distributed": 0,
+            "partial_distributed": 0,
+        }
+        attr_qkv_counts = {
+            "local": 0,
+            "gather": 0,
+            "owner": 0,
+            "distributed": 0,
+            "partial_distributed": 0,
+        }
         update_shape_counts: dict[tuple[str, tuple[int, ...]], int] = {}
         partial_distributed_candidate_count = 0
         partial_distributed_candidate_numels = 0
@@ -938,7 +1115,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             mode_numels[update_mode] = mode_numels.get(update_mode, 0) + tensor.numel()
             shape_key = (update_mode, tuple(tensor.shape))
             update_shape_counts[shape_key] = update_shape_counts.get(shape_key, 0) + 1
-            if update_mode in ("gather", "local_boundary", "partial_distributed"):
+            if update_mode in ("gather", "owner", "local_boundary", "partial_distributed"):
                 boundary_key = (update_mode, tuple(param.shape), tuple(tensor.shape))
                 boundary_full_shape_counts[boundary_key] = (
                     boundary_full_shape_counts.get(boundary_key, 0) + 1
@@ -993,21 +1170,36 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"({mode_numels.get('local', 0) / 1e9:.3f}B local elems), "
             f"gather={mode_counts.get('gather', 0)} "
             f"({mode_numels.get('gather', 0) / 1e9:.3f}B local elems), "
+            f"owner={mode_counts.get('owner', 0)} "
+            f"({mode_numels.get('owner', 0) / 1e9:.3f}B local elems), "
             f"distributed_ns={mode_counts.get('distributed', 0)} "
             f"({mode_numels.get('distributed', 0) / 1e9:.3f}B local elems), "
             f"partial_distributed_ns={mode_counts.get('partial_distributed', 0)} "
             f"({mode_numels.get('partial_distributed', 0) / 1e9:.3f}B local elems), "
             f"approx_local_boundary={mode_counts.get('local_boundary', 0)} "
             f"({mode_numels.get('local_boundary', 0) / 1e9:.3f}B local elems), "
-            f"qkv_local/gather/distributed/partial={qkv_counts.get('local', 0)}/"
-            f"{qkv_counts.get('gather', 0)}/{qkv_counts.get('distributed', 0)}/"
+            f"qkv_local/gather/owner/distributed/partial={qkv_counts.get('local', 0)}/"
+            f"{qkv_counts.get('gather', 0)}/{qkv_counts.get('owner', 0)}/"
+            f"{qkv_counts.get('distributed', 0)}/"
             f"{qkv_counts.get('partial_distributed', 0)}, "
-            f"qkv_attr_local/gather/distributed/partial={attr_qkv_counts.get('local', 0)}/"
-            f"{attr_qkv_counts.get('gather', 0)}/{attr_qkv_counts.get('distributed', 0)}/"
+            "qkv_attr_local/gather/owner/distributed/partial="
+            f"{attr_qkv_counts.get('local', 0)}/"
+            f"{attr_qkv_counts.get('gather', 0)}/{attr_qkv_counts.get('owner', 0)}/"
+            f"{attr_qkv_counts.get('distributed', 0)}/"
             f"{attr_qkv_counts.get('partial_distributed', 0)}, "
-            f"qkv_named_local/gather/distributed/partial={named_qkv_counts.get('local', 0)}/"
-            f"{named_qkv_counts.get('gather', 0)}/{named_qkv_counts.get('distributed', 0)}/"
+            "qkv_named_local/gather/owner/distributed/partial="
+            f"{named_qkv_counts.get('local', 0)}/"
+            f"{named_qkv_counts.get('gather', 0)}/{named_qkv_counts.get('owner', 0)}/"
+            f"{named_qkv_counts.get('distributed', 0)}/"
             f"{named_qkv_counts.get('partial_distributed', 0)}, "
+            "boundary_owner_compute_scatter="
+            f"{self.fsdp_boundary_owner_compute_scatter}, "
+            "owner_compute_scatter_single_batch="
+            f"{self.fsdp_owner_compute_scatter_single_batch}, "
+            "owner_compute_scatter_async_gather="
+            f"{self.fsdp_owner_compute_scatter_async_gather}, "
+            "owner_compute_scatter_async_scatter="
+            f"{self.fsdp_owner_compute_scatter_async_scatter}, "
             f"distributed_ns_enabled={self.fsdp_distributed_ns}, "
             f"partial_distributed_ns_enabled={self.fsdp_partial_distributed_ns}, "
             f"distributed_ns_single_all_reduce={self.fsdp_distributed_ns_single_all_reduce}, "
@@ -1035,7 +1227,15 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"{self.fsdp_approx_local_boundary_flat_norm_all_reduce}, "
             "approx_local_boundary_async_norm_all_reduce="
             f"{self.fsdp_approx_local_boundary_async_norm_all_reduce}, "
+            "approx_local_boundary_threaded_norm_all_reduce="
+            f"{self.fsdp_approx_local_boundary_threaded_norm_all_reduce}, "
+            "approx_local_boundary_defer_norm_scaled_apply="
+            f"{self.fsdp_approx_local_boundary_defer_norm_scaled_apply}, "
             f"batched_qkv_local_boundary={self.fsdp_batched_qkv_local_boundary}, "
+            "batched_unsplit_qkv_local_boundary="
+            f"{self.fsdp_batched_unsplit_qkv_local_boundary}, "
+            "reuse_batched_ns_workspace="
+            f"{self.fsdp_reuse_batched_newton_schulz_workspace}, "
             f"defer_local_pre_ns_to_batched_ns={self.fsdp_defer_local_pre_ns_to_batched_ns}, "
             f"foreach_pre_ns={self.fsdp_foreach_pre_ns}, "
             f"distributed_ns_small_col_dim={self.fsdp_distributed_ns_small_col_dim}, "
@@ -1369,10 +1569,25 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
         early_gather_state = None
         boundary_update_indices = []
+        if self.fsdp_owner_compute_scatter_async_gather:
+            owner_flat_groups = []
+            for group, gather_param_indices, _, _ in group_contexts:
+                for param_idx, p in enumerate(group["params"]):
+                    if param_idx not in gather_param_indices:
+                        continue
+                    if self._fsdp_boundary_update_mode(p) != "owner":
+                        continue
+                    flat_plan = self._get_fsdp_owner_compute_scatter_plan(p)
+                    if flat_plan is not None:
+                        owner_flat_groups.append(flat_plan["flat_group"])
+            with torch.autograd.profiler.record_function(
+                "Muon-FSDP phase 0o init owner duplicate groups"
+            ):
+                self._ensure_fsdp_owner_duplicate_groups(owner_flat_groups)
+
         direct_boundary_pre_ns = (
             self.fsdp_boundary_pre_ns_into_gather_buffer
             and self.fsdp_boundary_gather_dtype not in ("int8", "fp8_e4m3fn", "fp8_e5m2")
-            and not self.fsdp_flat_batched_all_gather
         )
         if overlap_enabled:
             # Boundary pre-NS tensors are the only values needed by the
@@ -1512,6 +1727,16 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
         self._maybe_log_fsdp_update_mode_summary(all_updates)
 
+        async_owner_gather_state = None
+        if overlap_enabled and self.fsdp_owner_compute_scatter_async_gather:
+            owner_updates = [update for update in all_updates if update[2] == "owner"]
+            with torch.autograd.profiler.record_function(
+                "Muon-FSDP phase 2o start async owner gather"
+            ):
+                async_owner_gather_state = self._start_async_owner_compute_scatter_gathers(
+                    owner_updates
+                )
+
         # Phase 2: AG all boundary gradients.
         if not overlap_enabled:
             boundary_update_indices = [
@@ -1528,6 +1753,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         boundary_update_indices,
                         early_gather_state,
                         early_applied_update_indices,
+                        async_owner_gather_state,
                     )
                 else:
                     if boundary_update_indices:
@@ -1950,7 +2176,15 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return None
         if pre_ns_grad.numel() > self.fsdp_batched_newton_schulz_max_numel:
             return None
-        if self._is_split_qkv_param(p) or self._tp_partition_dim_for_param(p) is not None:
+        is_split_qkv = self._is_split_qkv_param(p)
+        allow_unsplit_qkv = (
+            is_split_qkv
+            and update_mode == "local_boundary"
+            and self.fsdp_batched_unsplit_qkv_local_boundary
+        )
+        if (is_split_qkv and not allow_unsplit_qkv) or self._tp_partition_dim_for_param(
+            p
+        ) is not None:
             return None
         scale_shape: tuple[int, ...] = ()
         if update_mode == "local_boundary" and self.fsdp_approx_local_boundary_full_shape_scale:
@@ -1962,6 +2196,540 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             pre_ns_grad.dtype,
             pre_ns_grad.device,
         )
+
+    def _fsdp_direct_boundary_batched_ns_key(
+        self, p: torch.Tensor, reference_tensor: torch.Tensor | None, update_mode: str
+    ) -> tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype, torch.device] | None:
+        if not self.fsdp_boundary_gather_direct_batched_ns:
+            return None
+        if not self.fsdp_batched_newton_schulz:
+            return None
+        if update_mode != "gather" or reference_tensor is None:
+            return None
+        if self.fsdp_boundary_gather_dtype not in ("fp32", "bf16"):
+            return None
+        if len(p.shape) != 2 or p.numel() == 0:
+            return None
+        if p.numel() > self.fsdp_batched_newton_schulz_max_numel:
+            return None
+        if self._is_split_qkv_param(p) or self._tp_partition_dim_for_param(p) is not None:
+            return None
+        return (update_mode, tuple(p.shape), (), reference_tensor.dtype, reference_tensor.device)
+
+    def _fsdp_owner_compute_scatter_key(
+        self, p: torch.Tensor, pre_ns_grad: torch.Tensor | None, update_mode: str
+    ) -> tuple[str, int, torch.dtype, torch.device, torch.dtype] | None:
+        if update_mode != "owner" or pre_ns_grad is None:
+            return None
+        flat_plan = self._get_fsdp_owner_compute_scatter_plan(p)
+        if flat_plan is None:
+            return None
+        if pre_ns_grad.numel() != flat_plan["flat_rank_numels"][flat_plan["flat_group_rank"]]:
+            return None
+        return (
+            update_mode,
+            id(flat_plan["flat_group"]),
+            pre_ns_grad.dtype,
+            pre_ns_grad.device,
+            p._local_tensor.dtype,
+        )
+
+    def _iter_owner_compute_scatter_chunks(self, updates: list) -> list[tuple[int, list]]:
+        chunks = []
+        current_chunk = []
+        current_full_bytes = 0
+        current_start_ordinal = 0
+        max_full_bytes = max(1, self.fsdp_batch_max_gather_bytes)
+        if self.fsdp_owner_compute_scatter_single_batch:
+            max_full_bytes = 2**63 - 1
+        for item_ordinal, update in enumerate(updates):
+            p, pre_ns_grad, *_ = update
+            if pre_ns_grad is None:
+                if current_chunk:
+                    chunks.append((current_start_ordinal, current_chunk))
+                    current_chunk = []
+                    current_full_bytes = 0
+                chunks.append((item_ordinal, [update]))
+                current_start_ordinal = item_ordinal + 1
+                continue
+            wire_element_size = self._boundary_gather_wire_element_size(pre_ns_grad.dtype)
+            update_full_bytes = int(p.numel()) * wire_element_size
+            if current_chunk and current_full_bytes + update_full_bytes > max_full_bytes:
+                chunks.append((current_start_ordinal, current_chunk))
+                current_chunk = []
+                current_full_bytes = 0
+                current_start_ordinal = item_ordinal
+            if not current_chunk:
+                current_start_ordinal = item_ordinal
+            current_chunk.append(update)
+            current_full_bytes += update_full_bytes
+        if current_chunk:
+            chunks.append((current_start_ordinal, current_chunk))
+        return chunks
+
+    def _owner_rank_for_boundary_item(self, flat_plan: dict[str, Any], item_ordinal: int) -> int:
+        active_ranks = flat_plan["flat_active_rank_indices"]
+        if not active_ranks:
+            return flat_plan["flat_group_rank"]
+        return active_ranks[item_ordinal % len(active_ranks)]
+
+    def _flat_rank_shard_from_full_update(
+        self, full_update: torch.Tensor, flat_plan: dict[str, Any], rank: int
+    ) -> torch.Tensor:
+        chunk_info = flat_plan["flat_chunk_infos"][rank]
+        chunk_numel = chunk_info["numel"]
+        if chunk_numel == 0:
+            return full_update.new_empty((0,))
+        chunk_shape = chunk_info["shape"]
+        slices = tuple(slice(o, o + s) for o, s in zip(chunk_info["offset"], chunk_shape))
+        return full_update[slices].contiguous().view(-1)
+
+    def _prepare_owner_compute_scatter_state(
+        self,
+        chunk: list,
+        *,
+        item_ordinal_offset: int = 0,
+        collective_group: torch.distributed.ProcessGroup | None = None,
+    ) -> dict[str, Any]:
+        first_p, first_pre_ns, *_ = chunk[0]
+        assert first_pre_ns is not None
+        first_flat_plan = self._get_fsdp_owner_compute_scatter_plan(first_p)
+        if first_flat_plan is None:
+            raise AssertionError("Owner-compute-scatter received an ineligible parameter.")
+
+        flat_group = first_flat_plan["flat_group"]
+        if collective_group is None:
+            collective_group = flat_group
+        group_size = first_flat_plan["flat_group_size"]
+        group_rank = first_flat_plan["flat_group_rank"]
+        wire_dtype = self._boundary_gather_wire_dtype(first_pre_ns.dtype)
+        device = first_pre_ns.device
+        param_dtype = first_p._local_tensor.dtype
+
+        flat_plans = []
+        wire_buffers = []
+        owners = []
+        for item_ordinal, update in enumerate(chunk):
+            p, pre_ns_grad, update_mode, _, _ = update
+            if update_mode != "owner" or pre_ns_grad is None:
+                raise AssertionError("Owner-compute-scatter chunk contains a non-owner update.")
+            flat_plan = self._get_fsdp_owner_compute_scatter_plan(p)
+            if flat_plan is None or flat_plan["flat_group"] is not flat_group:
+                raise AssertionError(
+                    "Owner-compute-scatter chunk mixed incompatible FSDP flat groups."
+                )
+            if pre_ns_grad.device != device or pre_ns_grad.dtype != first_pre_ns.dtype:
+                raise AssertionError("Owner-compute-scatter chunk mixed dtype/device unexpectedly.")
+            if p._local_tensor.dtype != param_dtype:
+                raise AssertionError("Owner-compute-scatter chunk mixed parameter dtypes.")
+            expected_numel = flat_plan["flat_rank_numels"][group_rank]
+            if pre_ns_grad.numel() != expected_numel:
+                raise AssertionError(
+                    "Owner-compute-scatter local pre-NS size mismatch: "
+                    f"got={pre_ns_grad.numel()}, expected={expected_numel}."
+                )
+            flat_plans.append(flat_plan)
+            wire_buffers.append(
+                self._flatten_tensor_for_uneven_gather(
+                    self._prepare_boundary_gather_tensor(pre_ns_grad)
+                )
+            )
+            owners.append(
+                self._owner_rank_for_boundary_item(flat_plan, item_ordinal_offset + item_ordinal)
+            )
+
+        gather_send_counts = [0] * group_size
+        for flat_plan, owner in zip(flat_plans, owners):
+            gather_send_counts[owner] += flat_plan["flat_rank_numels"][group_rank]
+
+        gather_send = torch.empty(sum(gather_send_counts), dtype=wire_dtype, device=device)
+        send_offsets = [0] * group_size
+        cursor = 0
+        for rank, count in enumerate(gather_send_counts):
+            send_offsets[rank] = cursor
+            cursor += count
+        send_cursors = send_offsets.copy()
+        for flat_plan, owner, wire_buffer in zip(flat_plans, owners, wire_buffers):
+            expected_numel = flat_plan["flat_rank_numels"][group_rank]
+            if wire_buffer.numel() != expected_numel:
+                raise AssertionError(
+                    "Owner-compute-scatter wire buffer size mismatch: "
+                    f"got={wire_buffer.numel()}, expected={expected_numel}."
+                )
+            if expected_numel == 0:
+                continue
+            offset = send_cursors[owner]
+            gather_send[offset : offset + expected_numel].copy_(wire_buffer)
+            send_cursors[owner] += expected_numel
+
+        gather_recv_counts = [0] * group_size
+        for flat_plan, owner in zip(flat_plans, owners):
+            if owner != group_rank:
+                continue
+            for rank, rank_numel in enumerate(flat_plan["flat_rank_numels"]):
+                gather_recv_counts[rank] += rank_numel
+
+        gather_recv = torch.empty(sum(gather_recv_counts), dtype=wire_dtype, device=device)
+        print_owner_chunk = (
+            self._should_print_fsdp_diagnostic() and self._fsdp_owner_chunk_diagnostics_logged < 16
+        )
+        if print_owner_chunk:
+            print(  # pylint: disable=W0141
+                self._fsdp_diagnostic_prefix() + "Muon+M-FSDP owner chunk gather: "
+                f"ordinal_offset={item_ordinal_offset}, items={len(chunk)}, "
+                f"owned_items={sum(1 for owner in owners if owner == group_rank)}, "
+                f"unique_owners={len(set(owners))}, "
+                f"send_peers={sum(count > 0 for count in gather_send_counts)}, "
+                f"recv_peers={sum(count > 0 for count in gather_recv_counts)}, "
+                f"send_mib={gather_send.numel() * gather_send.element_size() / (1024 ** 2):.1f}, "
+                f"recv_mib={gather_recv.numel() * gather_recv.element_size() / (1024 ** 2):.1f}",
+                flush=True,
+            )
+        return {
+            "chunk": chunk,
+            "item_ordinal_offset": item_ordinal_offset,
+            "flat_group": flat_group,
+            "collective_group": collective_group,
+            "group_size": group_size,
+            "group_rank": group_rank,
+            "wire_dtype": wire_dtype,
+            "device": device,
+            "param_dtype": param_dtype,
+            "flat_plans": flat_plans,
+            "owners": owners,
+            "gather_send_counts": gather_send_counts,
+            "gather_recv_counts": gather_recv_counts,
+            "gather_send": gather_send,
+            "gather_recv": gather_recv,
+            "print_owner_chunk": print_owner_chunk,
+        }
+
+    def _start_owner_compute_scatter_gather(
+        self, state: dict[str, Any], *, async_op: bool = False
+    ) -> None:
+        chunk = state["chunk"]
+        gather_send = state["gather_send"]
+        gather_recv = state["gather_recv"]
+        gather_send_counts = state["gather_send_counts"]
+        gather_recv_counts = state["gather_recv_counts"]
+        collective_group = state["collective_group"]
+        with torch.autograd.profiler.record_function(
+            "Muon-FSDP owner gather all-to-all "
+            f"count={len(chunk)} "
+            f"send_mib={gather_send.numel() * gather_send.element_size() / (1024 ** 2):.1f} "
+            f"recv_mib={gather_recv.numel() * gather_recv.element_size() / (1024 ** 2):.1f}"
+        ):
+            if async_op and state["device"].type == "cuda":
+                device = state["device"]
+                with torch.cuda.device(device):
+                    owner_stream = self._get_fsdp_owner_comm_stream(device)
+                    owner_stream.wait_stream(torch.cuda.current_stream(device))
+                    gather_send.record_stream(owner_stream)
+                    gather_recv.record_stream(owner_stream)
+                    with torch.cuda.stream(owner_stream):
+                        state["gather_work"] = torch.distributed.all_to_all_single(
+                            gather_recv,
+                            gather_send,
+                            output_split_sizes=gather_recv_counts,
+                            input_split_sizes=gather_send_counts,
+                            group=collective_group,
+                            async_op=True,
+                        )
+                    state["gather_stream"] = owner_stream
+            else:
+                torch.distributed.all_to_all_single(
+                    gather_recv,
+                    gather_send,
+                    output_split_sizes=gather_recv_counts,
+                    input_split_sizes=gather_send_counts,
+                    group=collective_group,
+                )
+
+    def _wait_owner_compute_scatter_gather(self, state: dict[str, Any]) -> None:
+        work = state.get("gather_work")
+        if work is not None:
+            work.wait()
+        gather_stream = state.get("gather_stream")
+        if gather_stream is not None:
+            device = state["device"]
+            with torch.cuda.device(device):
+                torch.cuda.current_stream(device).wait_stream(gather_stream)
+
+    def _prepare_owner_compute_scatter_scatter(self, state: dict[str, Any]) -> None:
+        self._wait_owner_compute_scatter_gather(state)
+
+        chunk = state["chunk"]
+        group_size = state["group_size"]
+        group_rank = state["group_rank"]
+        param_dtype = state["param_dtype"]
+        device = state["device"]
+        flat_plans = state["flat_plans"]
+        owners = state["owners"]
+        gather_recv_counts = state["gather_recv_counts"]
+        gather_recv = state["gather_recv"]
+        print_owner_chunk = state["print_owner_chunk"]
+        item_ordinal_offset = state["item_ordinal_offset"]
+
+        recv_base_offsets = [0] * group_size
+        cursor = 0
+        for rank, count in enumerate(gather_recv_counts):
+            recv_base_offsets[rank] = cursor
+            cursor += count
+        rank_buffers = [
+            gather_recv[
+                recv_base_offsets[rank] : recv_base_offsets[rank] + gather_recv_counts[rank]
+            ]
+            for rank in range(group_size)
+        ]
+
+        owner_rank_offsets_by_item: dict[int, list[int]] = {}
+        owner_rank_cursors = [0] * group_size
+        for item_idx, (flat_plan, owner) in enumerate(zip(flat_plans, owners)):
+            if owner != group_rank:
+                continue
+            rank_offsets = []
+            for rank, rank_numel in enumerate(flat_plan["flat_rank_numels"]):
+                rank_offsets.append(owner_rank_cursors[rank])
+                owner_rank_cursors[rank] += rank_numel
+            owner_rank_offsets_by_item[item_idx] = rank_offsets
+
+        scatter_send_counts = [0] * group_size
+        for flat_plan, owner in zip(flat_plans, owners):
+            if owner != group_rank:
+                continue
+            for rank, rank_numel in enumerate(flat_plan["flat_rank_numels"]):
+                scatter_send_counts[rank] += rank_numel
+
+        scatter_send = torch.empty(sum(scatter_send_counts), dtype=param_dtype, device=device)
+        scatter_send_offsets = [0] * group_size
+        cursor = 0
+        for rank, count in enumerate(scatter_send_counts):
+            scatter_send_offsets[rank] = cursor
+            cursor += count
+        scatter_send_cursors = scatter_send_offsets.copy()
+
+        with torch.autograd.profiler.record_function(
+            f"Muon-FSDP owner full NS/update compute count={len(owner_rank_offsets_by_item)}"
+        ):
+            for item_idx, rank_offsets in owner_rank_offsets_by_item.items():
+                p, pre_ns_grad, _, _, group_kwargs = chunk[item_idx]
+                flat_plan = flat_plans[item_idx]
+                full_pre_ns = self._reconstruct_full_tensor_from_flat_rank_buffers(
+                    p, flat_plan, rank_buffers, rank_offsets
+                )
+                full_pre_ns = self._restore_boundary_gather_tensor(full_pre_ns, pre_ns_grad)
+                assert full_pre_ns is not None
+                full_update = super(FSDPTensorParallelMuon, self).orthogonalize(
+                    p, full_pre_ns, **group_kwargs
+                )
+                for rank, rank_numel in enumerate(flat_plan["flat_rank_numels"]):
+                    if rank_numel == 0:
+                        continue
+                    shard_update = self._flat_rank_shard_from_full_update(
+                        full_update, flat_plan, rank
+                    )
+                    if shard_update.dtype != param_dtype:
+                        shard_update = shard_update.to(dtype=param_dtype)
+                    offset = scatter_send_cursors[rank]
+                    scatter_send[offset : offset + rank_numel].copy_(shard_update)
+                    scatter_send_cursors[rank] += rank_numel
+
+        scatter_recv_counts = [0] * group_size
+        for flat_plan, owner in zip(flat_plans, owners):
+            scatter_recv_counts[owner] += flat_plan["flat_rank_numels"][group_rank]
+
+        scatter_recv = torch.empty(sum(scatter_recv_counts), dtype=param_dtype, device=device)
+        if print_owner_chunk:
+            print(  # pylint: disable=W0141
+                self._fsdp_diagnostic_prefix() + "Muon+M-FSDP owner chunk scatter: "
+                f"ordinal_offset={item_ordinal_offset}, items={len(chunk)}, "
+                f"owned_items={len(owner_rank_offsets_by_item)}, "
+                f"send_peers={sum(count > 0 for count in scatter_send_counts)}, "
+                f"recv_peers={sum(count > 0 for count in scatter_recv_counts)}, "
+                f"send_mib={scatter_send.numel() * scatter_send.element_size() / (1024 ** 2):.1f}, "
+                f"recv_mib={scatter_recv.numel() * scatter_recv.element_size() / (1024 ** 2):.1f}",
+                flush=True,
+            )
+
+        state["scatter_send_counts"] = scatter_send_counts
+        state["scatter_recv_counts"] = scatter_recv_counts
+        state["scatter_send"] = scatter_send
+        state["scatter_recv"] = scatter_recv
+
+    def _start_owner_compute_scatter_scatter(
+        self, state: dict[str, Any], *, async_op: bool = False
+    ) -> None:
+        chunk = state["chunk"]
+        scatter_send = state["scatter_send"]
+        scatter_recv = state["scatter_recv"]
+        scatter_send_counts = state["scatter_send_counts"]
+        scatter_recv_counts = state["scatter_recv_counts"]
+        collective_group = state["collective_group"]
+        with torch.autograd.profiler.record_function(
+            "Muon-FSDP owner scatter all-to-all "
+            f"count={len(chunk)} "
+            f"send_mib={scatter_send.numel() * scatter_send.element_size() / (1024 ** 2):.1f} "
+            f"recv_mib={scatter_recv.numel() * scatter_recv.element_size() / (1024 ** 2):.1f}"
+        ):
+            if async_op and state["device"].type == "cuda":
+                device = state["device"]
+                with torch.cuda.device(device):
+                    owner_stream = self._get_fsdp_owner_comm_stream(device)
+                    owner_stream.wait_stream(torch.cuda.current_stream(device))
+                    scatter_send.record_stream(owner_stream)
+                    scatter_recv.record_stream(owner_stream)
+                    with torch.cuda.stream(owner_stream):
+                        state["scatter_work"] = torch.distributed.all_to_all_single(
+                            scatter_recv,
+                            scatter_send,
+                            output_split_sizes=scatter_recv_counts,
+                            input_split_sizes=scatter_send_counts,
+                            group=collective_group,
+                            async_op=True,
+                        )
+                    state["scatter_stream"] = owner_stream
+            else:
+                torch.distributed.all_to_all_single(
+                    scatter_recv,
+                    scatter_send,
+                    output_split_sizes=scatter_recv_counts,
+                    input_split_sizes=scatter_send_counts,
+                    group=collective_group,
+                )
+        if state["print_owner_chunk"]:
+            self._fsdp_owner_chunk_diagnostics_logged += 1
+
+    def _wait_owner_compute_scatter_scatter(self, state: dict[str, Any]) -> None:
+        work = state.get("scatter_work")
+        if work is not None:
+            work.wait()
+        scatter_stream = state.get("scatter_stream")
+        if scatter_stream is not None:
+            device = state["device"]
+            with torch.cuda.device(device):
+                torch.cuda.current_stream(device).wait_stream(scatter_stream)
+
+    def _apply_owner_compute_scatter_received_updates(self, state: dict[str, Any]) -> None:
+        self._wait_owner_compute_scatter_scatter(state)
+
+        chunk = state["chunk"]
+        group_size = state["group_size"]
+        group_rank = state["group_rank"]
+        flat_plans = state["flat_plans"]
+        owners = state["owners"]
+        scatter_recv_counts = state["scatter_recv_counts"]
+        scatter_recv = state["scatter_recv"]
+
+        scatter_recv_base_offsets = [0] * group_size
+        cursor = 0
+        for rank, count in enumerate(scatter_recv_counts):
+            scatter_recv_base_offsets[rank] = cursor
+            cursor += count
+        scatter_recv_cursors = scatter_recv_base_offsets.copy()
+
+        with torch.autograd.profiler.record_function(
+            f"Muon-FSDP owner local weight apply count={len(chunk)}"
+        ):
+            for owner, flat_plan, update in zip(owners, flat_plans, chunk):
+                p, _, _, lr, _ = update
+                local_numel = flat_plan["flat_rank_numels"][group_rank]
+                if local_numel == 0:
+                    continue
+                offset = scatter_recv_cursors[owner]
+                local_update = scatter_recv[offset : offset + local_numel].view(
+                    p._local_tensor.shape
+                )
+                scatter_recv_cursors[owner] += local_numel
+                self._apply_orthogonal_muon_update(p, local_update, "local", lr)
+
+    def _finish_owner_compute_scatter_muon_updates(self, state: dict[str, Any]) -> None:
+        self._prepare_owner_compute_scatter_scatter(state)
+        self._start_owner_compute_scatter_scatter(state)
+        self._apply_owner_compute_scatter_received_updates(state)
+
+    def _apply_owner_compute_scatter_muon_updates(
+        self, chunk: list, *, item_ordinal_offset: int = 0
+    ) -> None:
+        state = self._prepare_owner_compute_scatter_state(
+            chunk, item_ordinal_offset=item_ordinal_offset
+        )
+        self._start_owner_compute_scatter_gather(state)
+        self._finish_owner_compute_scatter_muon_updates(state)
+
+    def _owner_compute_scatter_chunks_for_updates(
+        self, updates: list
+    ) -> list[tuple[Any, int, list]]:
+        owner_batch_map: dict[tuple[str, int, torch.dtype, torch.device, torch.dtype], list] = {}
+        for update in updates:
+            p, pre_ns_grad, update_mode, _, _ = update
+            owner_key = self._fsdp_owner_compute_scatter_key(p, pre_ns_grad, update_mode)
+            if owner_key is None:
+                raise AssertionError("Async owner-compute/scatter received a non-owner update.")
+            owner_batch_map.setdefault(owner_key, []).append(update)
+
+        chunks = []
+        for key, candidate_updates in owner_batch_map.items():
+            for item_ordinal_offset, chunk in self._iter_owner_compute_scatter_chunks(
+                candidate_updates
+            ):
+                chunks.append((key, item_ordinal_offset, chunk))
+        return chunks
+
+    def _start_async_owner_compute_scatter_gathers(self, updates: list) -> list[dict[str, Any]]:
+        chunks = self._owner_compute_scatter_chunks_for_updates(updates) if updates else []
+        flat_groups = []
+        for _, _, chunk in chunks:
+            flat_plan = self._get_fsdp_owner_compute_scatter_plan(chunk[0][0])
+            if flat_plan is None:
+                raise AssertionError("Async owner-compute/scatter chunk lost its flat plan.")
+            flat_groups.append(flat_plan["flat_group"])
+        duplicate_groups = self._cached_fsdp_owner_duplicate_groups(flat_groups)
+
+        states = []
+        for _, item_ordinal_offset, chunk in chunks:
+            flat_plan = self._get_fsdp_owner_compute_scatter_plan(chunk[0][0])
+            assert flat_plan is not None
+            collective_group = duplicate_groups.get(
+                id(flat_plan["flat_group"]), flat_plan["flat_group"]
+            )
+            state = self._prepare_owner_compute_scatter_state(
+                chunk, item_ordinal_offset=item_ordinal_offset, collective_group=collective_group
+            )
+            with torch.autograd.profiler.record_function(
+                "Muon-FSDP owner async gather launch "
+                f"count={len(chunk)} ordinal_offset={item_ordinal_offset}"
+            ):
+                self._start_owner_compute_scatter_gather(state, async_op=True)
+            states.append(state)
+        return states
+
+    def _finish_async_owner_compute_scatter_gathers(
+        self, pending_owner_states: list[dict[str, Any]]
+    ) -> None:
+        if self.fsdp_owner_compute_scatter_async_scatter:
+            launched_scatter_states = []
+            for state in pending_owner_states:
+                with torch.autograd.profiler.record_function(
+                    "Muon-FSDP owner async gather finish/compute/start scatter "
+                    f"count={len(state['chunk'])} ordinal_offset={state['item_ordinal_offset']}"
+                ):
+                    self._prepare_owner_compute_scatter_scatter(state)
+                    self._start_owner_compute_scatter_scatter(state, async_op=True)
+                launched_scatter_states.append(state)
+            for state in launched_scatter_states:
+                with torch.autograd.profiler.record_function(
+                    "Muon-FSDP owner async scatter finish/apply "
+                    f"count={len(state['chunk'])} ordinal_offset={state['item_ordinal_offset']}"
+                ):
+                    self._apply_owner_compute_scatter_received_updates(state)
+            return
+
+        for state in pending_owner_states:
+            with torch.autograd.profiler.record_function(
+                "Muon-FSDP owner async gather finish/scatter "
+                f"count={len(state['chunk'])} ordinal_offset={state['item_ordinal_offset']}"
+            ):
+                self._finish_owner_compute_scatter_muon_updates(state)
 
     def _fsdp_batched_distributed_ns_key(
         self, p: torch.Tensor, pre_ns_grad: torch.Tensor | None, update_mode: str
@@ -2104,6 +2872,18 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         pre_ns_grad = self._compute_local_pre_ns_grad(p, group, lr)
         return (p, pre_ns_grad, update_mode, lr, group_kwargs)
 
+    def _empty_batched_ns_workspace(
+        self, tag: str, shape: tuple[int, ...], dtype: torch.dtype, device: torch.device
+    ) -> torch.Tensor:
+        if not self.fsdp_reuse_batched_newton_schulz_workspace:
+            return torch.empty(shape, dtype=dtype, device=device)
+        key = (tag, shape, dtype, device)
+        workspace = self._fsdp_batched_ns_workspace_cache.get(key)
+        if workspace is None:
+            workspace = torch.empty(shape, dtype=dtype, device=device)
+            self._fsdp_batched_ns_workspace_cache[key] = workspace
+        return workspace
+
     def _compute_deferred_local_pre_ns_stack(self, chunk: list) -> torch.Tensor | None:
         if not chunk:
             return None
@@ -2151,14 +2931,21 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 torch._foreach_add_(p_tensors, p_tensors, alpha=-(weight_decay * lr))
             torch._foreach_lerp_(mom_tensors, grad_tensors, 1 - momentum)
             source_tensors = grad_tensors if self.nesterov else mom_tensors
-            stacked_pre_ns = torch.empty(
-                (len(chunk),) + tuple(source_tensors[0].shape),
-                dtype=source_tensors[0].dtype,
-                device=source_tensors[0].device,
+            stack_shape = (len(chunk),) + tuple(source_tensors[0].shape)
+            stacked_pre_ns = self._empty_batched_ns_workspace(
+                "deferred_local_pre_ns",
+                stack_shape,
+                source_tensors[0].dtype,
+                source_tensors[0].device,
             )
             torch.stack(source_tensors, dim=0, out=stacked_pre_ns)
             if self.nesterov:
-                stacked_mom = torch.empty_like(stacked_pre_ns)
+                stacked_mom = self._empty_batched_ns_workspace(
+                    "deferred_local_pre_ns_mom",
+                    stack_shape,
+                    stacked_pre_ns.dtype,
+                    stacked_pre_ns.device,
+                )
                 torch.stack(mom_tensors, dim=0, out=stacked_mom)
                 stacked_pre_ns.lerp_(stacked_mom, momentum)
         return stacked_pre_ns
@@ -2215,10 +3002,18 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         max_rows = max(row_counts)
         cols = int(chunk[0][1].shape[1])
         if all(rows == max_rows for rows in row_counts):
-            stacked_pre_ns = torch.stack([update[1] for update in chunk], dim=0)
+            first = chunk[0][1]
+            stacked_pre_ns = self._empty_batched_ns_workspace(
+                "distributed_pre_ns", (len(chunk),) + tuple(first.shape), first.dtype, first.device
+            )
+            torch.stack([update[1] for update in chunk], dim=0, out=stacked_pre_ns)
             padded_local_rows = False
         else:
-            stacked_pre_ns = chunk[0][1].new_zeros((len(chunk), max_rows, cols))
+            first = chunk[0][1]
+            stacked_pre_ns = self._empty_batched_ns_workspace(
+                "distributed_pre_ns_padded", (len(chunk), max_rows, cols), first.dtype, first.device
+            )
+            stacked_pre_ns.zero_()
             for batch_idx, (_, pre_ns_grad, _, _, _) in enumerate(chunk):
                 rows = row_counts[batch_idx]
                 if rows:
@@ -2302,7 +3097,14 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 f"got {partial_shapes}."
             )
 
-        stacked_pre_ns = torch.stack(partial_pre_ns_updates, dim=0)
+        first = partial_pre_ns_updates[0]
+        stacked_pre_ns = self._empty_batched_ns_workspace(
+            "partial_distributed_pre_ns",
+            (len(partial_pre_ns_updates),) + tuple(first.shape),
+            first.dtype,
+            first.device,
+        )
+        torch.stack(partial_pre_ns_updates, dim=0, out=stacked_pre_ns)
         orth_updates = newton_schulz_tp(
             stacked_pre_ns,
             steps=self.num_ns_steps,
@@ -2496,6 +3298,56 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         global_norm = global_sq.sqrt().clamp_min(1e-7)
         return (local_norm / global_norm).to(device=pre_ns_grad.device, dtype=torch.float32)
 
+    def _collect_approx_local_boundary_norm_reduction_groups(
+        self,
+        entries: list[tuple[torch.Tensor, torch.Tensor, dict[str, Any] | None]],
+        remaining_entry_indices: set[int],
+        stage_idx: int | None,
+    ) -> list[tuple[torch.distributed.ProcessGroup, list[int]]]:
+        groups: dict[int, tuple[torch.distributed.ProcessGroup, list[int]]] = {}
+        for entry_idx, (p, _, plan) in enumerate(entries):
+            if entry_idx not in remaining_entry_indices:
+                continue
+            if plan is None:
+                continue
+            if stage_idx is None:
+                shard_group = self._get_existing_flat_uneven_gather_group(p, plan)
+                if shard_group is None or get_pg_size(shard_group) <= 1:
+                    continue
+            else:
+                if stage_idx >= len(plan["stages"]):
+                    continue
+                shard_group = plan["stages"][stage_idx]["shard_group"]
+
+            group_id = id(shard_group)
+            if group_id not in groups:
+                groups[group_id] = (shard_group, [])
+            groups[group_id][1].append(entry_idx)
+        return list(groups.values())
+
+    def _start_async_approx_local_boundary_norm_reductions(
+        self,
+        global_sqs: torch.Tensor,
+        groups: list[tuple[torch.distributed.ProcessGroup, list[int]]],
+    ) -> list[tuple[Any, torch.Tensor, list[int]]]:
+        pending = []
+        for shard_group, entry_indices in groups:
+            if get_pg_size(shard_group) <= 1:
+                continue
+            group_sqs = global_sqs[entry_indices].contiguous()
+            work = torch.distributed.all_reduce(
+                group_sqs, op=torch.distributed.ReduceOp.SUM, group=shard_group, async_op=True
+            )
+            pending.append((work, group_sqs, entry_indices))
+        return pending
+
+    def _finish_async_approx_local_boundary_norm_stage(
+        self, global_sqs: torch.Tensor, pending: list[tuple[Any, torch.Tensor, list[int]]]
+    ) -> None:
+        for work, group_sqs, entry_indices in pending:
+            work.wait()
+            global_sqs[entry_indices] = group_sqs
+
     def _begin_precompute_approx_local_boundary_global_norm_scales(
         self, updates: list
     ) -> dict[str, Any] | None:
@@ -2540,54 +3392,39 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             )
             local_sqs: torch.Tensor | None = None
             global_sqs: torch.Tensor | None = None
+            async_reduction_state: dict[str, Any] | None = None
+            threaded_norm_state: dict[str, Any] | None = None
 
             def launch_all_reduces() -> None:
                 assert global_sqs is not None
                 remaining_entry_indices = set(range(len(entries)))
-                if self.fsdp_approx_local_boundary_flat_norm_all_reduce:
-                    flat_groups: dict[int, tuple[torch.distributed.ProcessGroup, list[int]]] = {}
-                    for entry_idx, (p, _, plan) in enumerate(entries):
-                        if plan is None:
-                            remaining_entry_indices.discard(entry_idx)
-                            continue
-                        flat_group = self._get_existing_flat_uneven_gather_group(p, plan)
-                        if flat_group is None or get_pg_size(flat_group) <= 1:
-                            continue
-                        group_id = id(flat_group)
-                        if group_id not in flat_groups:
-                            flat_groups[group_id] = (flat_group, [])
-                        flat_groups[group_id][1].append(entry_idx)
+                for entry_idx, (_, _, plan) in enumerate(entries):
+                    if plan is None:
                         remaining_entry_indices.discard(entry_idx)
-
+                if self.fsdp_approx_local_boundary_flat_norm_all_reduce:
+                    flat_groups = self._collect_approx_local_boundary_norm_reduction_groups(
+                        entries, remaining_entry_indices, stage_idx=None
+                    )
                     if flat_groups:
-                        flat_count = sum(len(indices) for _, indices in flat_groups.values())
+                        flat_count = sum(len(indices) for _, indices in flat_groups)
                         with torch.autograd.profiler.record_function(
                             "Muon-FSDP approx boundary global norm flat all-reduce "
                             f"groups={len(flat_groups)} count={flat_count}"
                         ):
-                            for shard_group, entry_indices in flat_groups.values():
+                            for shard_group, entry_indices in flat_groups:
                                 group_sqs = global_sqs[entry_indices].contiguous()
                                 torch.distributed.all_reduce(
                                     group_sqs, op=torch.distributed.ReduceOp.SUM, group=shard_group
                                 )
                                 global_sqs[entry_indices] = group_sqs
+                                for entry_idx in entry_indices:
+                                    remaining_entry_indices.discard(entry_idx)
 
                 for stage_idx in range(max_stage_count):
-                    stage_groups: dict[int, tuple[torch.distributed.ProcessGroup, list[int]]] = {}
-                    for entry_idx, (_, _, plan) in enumerate(entries):
-                        if entry_idx not in remaining_entry_indices:
-                            continue
-                        if plan is None:
-                            continue
-                        if stage_idx >= len(plan["stages"]):
-                            continue
-                        shard_group = plan["stages"][stage_idx]["shard_group"]
-                        group_id = id(shard_group)
-                        if group_id not in stage_groups:
-                            stage_groups[group_id] = (shard_group, [])
-                        stage_groups[group_id][1].append(entry_idx)
-
-                    for shard_group, entry_indices in stage_groups.values():
+                    stage_groups = self._collect_approx_local_boundary_norm_reduction_groups(
+                        entries, remaining_entry_indices, stage_idx=stage_idx
+                    )
+                    for shard_group, entry_indices in stage_groups:
                         if get_pg_size(shard_group) <= 1:
                             continue
                         group_sqs = global_sqs[entry_indices].contiguous()
@@ -2609,9 +3446,97 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 ):
                     launch_all_reduces()
 
+            def launch_first_async_reduction_stage() -> None:
+                nonlocal async_reduction_state
+                assert global_sqs is not None
+                remaining_entry_indices = set(range(len(entries)))
+                for entry_idx, (_, _, plan) in enumerate(entries):
+                    if plan is None:
+                        remaining_entry_indices.discard(entry_idx)
+                first_stage_groups = []
+                if self.fsdp_approx_local_boundary_flat_norm_all_reduce:
+                    flat_groups = self._collect_approx_local_boundary_norm_reduction_groups(
+                        entries, remaining_entry_indices, stage_idx=None
+                    )
+                    first_stage_groups.extend(flat_groups)
+                    for _, entry_indices in flat_groups:
+                        for entry_idx in entry_indices:
+                            remaining_entry_indices.discard(entry_idx)
+                if max_stage_count > 0:
+                    first_stage_groups.extend(
+                        self._collect_approx_local_boundary_norm_reduction_groups(
+                            entries, remaining_entry_indices, stage_idx=0
+                        )
+                    )
+                pending = self._start_async_approx_local_boundary_norm_reductions(
+                    global_sqs, first_stage_groups
+                )
+                async_reduction_state = {
+                    "pending": pending,
+                    "remaining_entry_indices": remaining_entry_indices,
+                    "next_stage_idx": 1,
+                    "max_stage_count": max_stage_count,
+                }
+
+            def compute_local_sqs_and_launch_first_async_stage() -> None:
+                nonlocal local_sqs, global_sqs
+                with torch.autograd.profiler.record_function(
+                    f"Muon-FSDP approx boundary global norm local-sq count={len(entries)}"
+                ):
+                    local_sqs = compute_local_sqs()
+                global_sqs = local_sqs.clone()
+                with torch.autograd.profiler.record_function(
+                    "Muon-FSDP approx boundary global norm async launch "
+                    f"stages={max_stage_count} count={len(entries)}"
+                ):
+                    launch_first_async_reduction_stage()
+
             done_event = None
             first_device = entries[0][1].device
             if (
+                self.fsdp_approx_local_boundary_threaded_norm_all_reduce
+                and first_device.type == "cuda"
+                and torch.cuda.is_available()
+            ):
+                import threading
+
+                threaded_result: dict[str, Any] = {}
+                with torch.cuda.device(first_device):
+                    ready_event = torch.cuda.Event()
+                    current_stream = torch.cuda.current_stream(first_device)
+                    current_stream.record_event(ready_event)
+                    comm_stream = self._get_fsdp_comm_stream(first_device)
+                    for _, pre_ns_grad, _ in entries:
+                        pre_ns_grad.record_stream(comm_stream)
+
+                def run_norm_reductions() -> None:
+                    nonlocal local_sqs, global_sqs
+                    try:
+                        with torch.cuda.device(first_device):
+                            with torch.cuda.stream(comm_stream):
+                                comm_stream.wait_event(ready_event)
+                                compute_local_sqs_and_launch_reduces()
+                                assert local_sqs is not None and global_sqs is not None
+                                local_sqs.record_stream(comm_stream)
+                                global_sqs.record_stream(comm_stream)
+                                worker_done_event = torch.cuda.Event()
+                                worker_done_event.record(comm_stream)
+                        threaded_result["local_sqs"] = local_sqs
+                        threaded_result["global_sqs"] = global_sqs
+                        threaded_result["done_event"] = worker_done_event
+                    except BaseException as exc:
+                        threaded_result["exception"] = exc
+
+                thread = threading.Thread(
+                    target=run_norm_reductions, name="muon-fsdp-norm-all-reduce"
+                )
+                thread.start()
+                threaded_norm_state = {
+                    "thread": thread,
+                    "result": threaded_result,
+                    "device": first_device,
+                }
+            elif (
                 self.fsdp_approx_local_boundary_async_norm_all_reduce
                 and first_device.type == "cuda"
                 and torch.cuda.is_available()
@@ -2634,15 +3559,18 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             else:
                 compute_local_sqs_and_launch_reduces()
 
-            assert local_sqs is not None and global_sqs is not None
+            if threaded_norm_state is None:
+                assert local_sqs is not None and global_sqs is not None
 
             return {
                 "entries": entries,
                 "local_sqs": local_sqs,
                 "global_sqs": global_sqs,
                 "done_event": done_event,
-                "device": local_sqs.device,
+                "device": first_device if threaded_norm_state is not None else local_sqs.device,
                 "finished": None,
+                "async_reduction_state": async_reduction_state,
+                "threaded_norm_state": threaded_norm_state,
             }
 
     def _finish_precompute_approx_local_boundary_global_norm_scales(
@@ -2657,15 +3585,57 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return finished
 
         entries = work["entries"]
-        local_sqs = work["local_sqs"]
-        global_sqs = work["global_sqs"]
+        threaded_norm_state = work.get("threaded_norm_state")
+        if threaded_norm_state is not None:
+            with torch.autograd.profiler.record_function(
+                f"Muon-FSDP approx boundary global norm threaded join count={len(entries)}"
+            ):
+                thread = threaded_norm_state["thread"]
+                thread.join()
+            threaded_result = threaded_norm_state["result"]
+            exception = threaded_result.get("exception")
+            if exception is not None:
+                raise exception
+            local_sqs = threaded_result.get("local_sqs")
+            global_sqs = threaded_result.get("global_sqs")
+            if local_sqs is None or global_sqs is None:
+                raise AssertionError(
+                    "Muon-FSDP threaded boundary norm reductions did not produce norms."
+                )
+            work["local_sqs"] = local_sqs
+            work["global_sqs"] = global_sqs
+            work["done_event"] = threaded_result.get("done_event")
+        else:
+            local_sqs = work["local_sqs"]
+            global_sqs = work["global_sqs"]
         done_event = work.get("done_event")
+        async_reduction_state = work.get("async_reduction_state")
         if done_event is not None:
             with torch.autograd.profiler.record_function(
                 f"Muon-FSDP approx boundary global norm wait count={len(entries)}"
             ):
                 with torch.cuda.device(work["device"]):
                     torch.cuda.current_stream(work["device"]).wait_event(done_event)
+
+        if async_reduction_state is not None:
+            with torch.autograd.profiler.record_function(
+                f"Muon-FSDP approx boundary global norm async finish count={len(entries)}"
+            ):
+                pending = async_reduction_state["pending"]
+                if pending:
+                    self._finish_async_approx_local_boundary_norm_stage(global_sqs, pending)
+                remaining_entry_indices = async_reduction_state["remaining_entry_indices"]
+                for stage_idx in range(
+                    async_reduction_state["next_stage_idx"],
+                    async_reduction_state["max_stage_count"],
+                ):
+                    stage_groups = self._collect_approx_local_boundary_norm_reduction_groups(
+                        entries, remaining_entry_indices, stage_idx=stage_idx
+                    )
+                    pending = self._start_async_approx_local_boundary_norm_reductions(
+                        global_sqs, stage_groups
+                    )
+                    self._finish_async_approx_local_boundary_norm_stage(global_sqs, pending)
 
         with torch.autograd.profiler.record_function(
             f"Muon-FSDP approx boundary global norm ratio count={len(entries)}"
@@ -2797,9 +3767,19 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 f"mode={mode} shape={shape} split_dim={split_dim} component={component_idx} "
                 f"component_shape={component_shape} count={len(chunk)}"
             ):
-                stacked_component = torch.stack(
-                    [components[component_idx] for components in split_components_by_update], dim=0
+                first_component = split_components_by_update[0][component_idx]
+                stacked_component = self._empty_batched_ns_workspace(
+                    f"split_qkv_pre_ns_{component_idx}",
+                    (len(chunk),) + tuple(first_component.shape),
+                    first_component.dtype,
+                    first_component.device,
                 )
+                torch.stack(
+                    [components[component_idx] for components in split_components_by_update],
+                    dim=0,
+                    out=stacked_component,
+                )
+                orth_component_batch = self.scaled_orthogonalize_fn(stacked_component, None, None)
                 orth_component_batch = self.scaled_orthogonalize_fn(stacked_component, None, None)
             for update_idx, orth_component in enumerate(orth_component_batch.unbind(0)):
                 if split_dim == 0:
@@ -2858,6 +3838,55 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 )
             return precomputed_norm_scales
 
+        deferred_norm_scaled_local_boundary_batches: list[
+            tuple[list, torch.Tensor, tuple[int, ...]]
+        ] = []
+
+        def should_defer_norm_scaled_apply(mode: str, scale_shape: tuple[int, ...]) -> bool:
+            return (
+                self.fsdp_approx_local_boundary_defer_norm_scaled_apply
+                and norm_scale_work is not None
+                and self.fsdp_approx_local_boundary_async_norm_all_reduce
+                and mode == "local_boundary"
+                and self.fsdp_approx_local_boundary_global_norm_scale
+                and not scale_shape
+            )
+
+        def scale_local_boundary_orth_updates(
+            chunk: list, orth_updates: torch.Tensor, norm_scales_by_param: dict[int, torch.Tensor]
+        ) -> None:
+            norm_scales = []
+            for update in chunk:
+                norm_scale = norm_scales_by_param.get(id(update[0]))
+                if norm_scale is None:
+                    raise AssertionError(
+                        "Missing precomputed local-boundary norm scale " "for batched Muon update."
+                    )
+                norm_scales.append(
+                    norm_scale.to(device=orth_updates.device, dtype=orth_updates.dtype)
+                )
+            norm_scale_shape = (len(norm_scales),) + (1,) * (orth_updates.ndim - 1)
+            orth_updates.mul_(torch.stack(norm_scales).view(norm_scale_shape))
+
+        def apply_deferred_norm_scaled_local_boundary_batches() -> None:
+            nonlocal deferred_norm_scaled_local_boundary_batches
+            if not deferred_norm_scaled_local_boundary_batches:
+                return
+            norm_scales_by_param = get_precomputed_norm_scales()
+            for chunk, orth_updates, shape in deferred_norm_scaled_local_boundary_batches:
+                with torch.autograd.profiler.record_function(
+                    "Muon-FSDP deferred local-boundary norm-scaled apply "
+                    f"shape={shape} count={len(chunk)}"
+                ):
+                    scale_local_boundary_orth_updates(chunk, orth_updates, norm_scales_by_param)
+                    if not self._try_apply_orthogonal_muon_update_foreach(chunk, orth_updates):
+                        for orth_update, (p, _, update_mode, lr, _) in zip(
+                            orth_updates.unbind(0), chunk
+                        ):
+                            self._apply_orthogonal_muon_update(p, orth_update, update_mode, lr)
+                maybe_progress()
+            deferred_norm_scaled_local_boundary_batches = []
+
         batch_map: dict[
             tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype, torch.device], list
         ] = {}
@@ -2870,6 +3899,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         partial_distributed_batch_map: dict[
             tuple[str, tuple[int, ...], torch.dtype, torch.device, int, int], list
         ] = {}
+        owner_batch_map: dict[tuple[str, int, torch.dtype, torch.device, torch.dtype], list] = {}
         qkv_batch_map: dict[tuple[str, tuple[int, ...], torch.dtype, torch.device, int], list] = {}
         fallback_updates = []
         shape_counts: dict[tuple[str, tuple[int, ...]], int] = {}
@@ -2886,6 +3916,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 return "distributed"
             if update_mode == "partial_distributed":
                 return "partial_distributed"
+            if update_mode == "owner":
+                return "owner"
             if pre_ns_grad is None:
                 return "missing_pre_ns"
             if pre_ns_grad.ndim != 2:
@@ -2926,6 +3958,14 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 shape_counts[(partial_distributed_key[0], partial_distributed_key[1])] = (
                     shape_counts.get((partial_distributed_key[0], partial_distributed_key[1]), 0)
                     + 1
+                )
+                continue
+            owner_key = self._fsdp_owner_compute_scatter_key(p, pre_ns_grad, update_mode)
+            if owner_key is not None:
+                owner_batch_map.setdefault(owner_key, []).append(update)
+                owner_shape = tuple(int(dim) for dim in p.shape)
+                shape_counts[(owner_key[0], owner_shape)] = (
+                    shape_counts.get((owner_key[0], owner_shape), 0) + 1
                 )
                 continue
             key = self._fsdp_batched_ns_key(p, pre_ns_grad, update_mode)
@@ -3021,7 +4061,15 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 with torch.autograd.profiler.record_function(
                     f"Muon-FSDP batched NS/update mode={mode} shape={shape} count={len(chunk)}"
                 ):
-                    stacked_pre_ns = torch.stack([update[1] for update in chunk], dim=0)
+                    first = chunk[0][1]
+                    stacked_pre_ns = self._empty_batched_ns_workspace(
+                        f"{mode}_pre_ns",
+                        (len(chunk),) + tuple(first.shape),
+                        first.dtype,
+                        first.device,
+                    )
+                    torch.stack([update[1] for update in chunk], dim=0, out=stacked_pre_ns)
+                    defer_apply = False
                     if mode == "local_boundary" and scale_shape:
                         orth_updates = self._approx_local_boundary_orthogonalize(
                             chunk[0][0], stacked_pre_ns
@@ -3032,21 +4080,17 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                             mode == "local_boundary"
                             and self.fsdp_approx_local_boundary_global_norm_scale
                         ):
-                            norm_scales = []
-                            for update in chunk:
-                                norm_scale = get_precomputed_norm_scales().get(id(update[0]))
-                                if norm_scale is None:
-                                    raise AssertionError(
-                                        "Missing precomputed local-boundary norm scale "
-                                        "for batched Muon update."
-                                    )
-                                norm_scales.append(
-                                    norm_scale.to(
-                                        device=orth_updates.device, dtype=orth_updates.dtype
-                                    )
+                            if should_defer_norm_scaled_apply(mode, scale_shape):
+                                deferred_norm_scaled_local_boundary_batches.append(
+                                    (chunk, orth_updates, shape)
                                 )
-                            norm_scale_shape = (len(norm_scales),) + (1,) * (orth_updates.ndim - 1)
-                            orth_updates.mul_(torch.stack(norm_scales).view(norm_scale_shape))
+                                defer_apply = True
+                            else:
+                                scale_local_boundary_orth_updates(
+                                    chunk, orth_updates, get_precomputed_norm_scales()
+                                )
+                    if defer_apply:
+                        continue
                     if not self._try_apply_orthogonal_muon_update_foreach(chunk, orth_updates):
                         for orth_update, (p, _, update_mode, lr, _) in zip(
                             orth_updates.unbind(0), chunk
@@ -3054,8 +4098,27 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                             self._apply_orthogonal_muon_update(p, orth_update, update_mode, lr)
                 maybe_progress()
 
+        apply_deferred_norm_scaled_local_boundary_batches()
+
         if not self.fsdp_prioritize_distributed_ns:
             apply_distributed_batches()
+
+        for key, candidate_updates in owner_batch_map.items():
+            for item_ordinal_offset, chunk in self._iter_owner_compute_scatter_chunks(
+                candidate_updates
+            ):
+                batched_chunks += 1
+                batched_updates += len(chunk)
+                _, _, pre_ns_dtype, device, param_dtype = key
+                with torch.autograd.profiler.record_function(
+                    "Muon-FSDP owner compute/scatter "
+                    f"count={len(chunk)} pre_ns_dtype={pre_ns_dtype} "
+                    f"param_dtype={param_dtype} device={device}"
+                ):
+                    self._apply_owner_compute_scatter_muon_updates(
+                        chunk, item_ordinal_offset=item_ordinal_offset
+                    )
+                maybe_progress()
 
         for key, candidate_updates in partial_distributed_batch_map.items():
             for chunk in self._iter_batched_partial_distributed_ns_chunks(candidate_updates):
@@ -3110,6 +4173,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 + sum(len(updates) for updates in deferred_local_pre_ns_map.values())
                 + sum(len(updates) for updates in distributed_batch_map.values())
                 + sum(len(updates) for updates in partial_distributed_batch_map.values())
+                + sum(len(updates) for updates in owner_batch_map.values())
                 + sum(len(updates) for updates in qkv_batch_map.values())
             ),
             batched_chunks=batched_chunks,
@@ -3155,6 +4219,17 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                     p, pre_ns_grad, **group_kwargs
                 )
             self._apply_orthogonal_muon_update(p, orth_update, update_mode, lr)
+            return
+
+        if update_mode == "owner":
+            if pre_ns_grad is None:
+                return
+            with torch.autograd.profiler.record_function(
+                f"Muon-FSDP individual owner compute/scatter shape={tuple(p.shape)}"
+            ):
+                self._apply_owner_compute_scatter_muon_updates(
+                    [(p, pre_ns_grad, update_mode, lr, group_kwargs)]
+                )
             return
 
         assert pre_ns_grad is not None
@@ -3290,6 +4365,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         boundary_update_indices: list[int],
         gather_state: dict[str, Any] | None = None,
         applied_update_indices: set[int] | None = None,
+        pending_owner_states: list[dict[str, Any]] | None = None,
     ) -> None:
         if gather_state is None:
             gather_state = self._start_overlap_boundary_gathers(
@@ -3318,6 +4394,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         direct_pre_ns = bool(gather_state.get("direct_pre_ns", False))
         applied_update_indices = applied_update_indices or set()
 
+        deferred_owner_updates = []
         deferred_distributed_updates = []
         deferred_partial_updates = []
         local_only_updates = []
@@ -3327,6 +4404,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 continue
             update_mode = update[2]
             if update_mode == "gather":
+                continue
+            if update_mode == "owner":
+                deferred_owner_updates.append((idx, update))
                 continue
             if update_mode in ("distributed", "partial_distributed"):
                 defer_update = self.fsdp_defer_distributed_ns_under_gather or (
@@ -3353,8 +4433,14 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             )
 
         progressed_item_indices: list[int] = []
+        direct_boundary_groups: list[
+            tuple[list[int], list, torch.Tensor, tuple[int, ...], torch.cuda.Event | None]
+        ] = []
+        completed_item_ready_events: dict[int, torch.cuda.Event] = {}
+        processed_item_indices: set[int] = set()
 
         next_scratch_slot = self.fsdp_overlap_boundary_prefetch_batches
+        reusable_scratch_slots: list[int] = []
 
         async_partial_pending_chunks: list[dict[str, Any]] = []
         if deferred_partial_updates:
@@ -3384,15 +4470,98 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             pending_queue.append((next_pending, slot))
             return True
 
-        def top_up_pending_queue(target_depth: int) -> None:
+        def allocate_scratch_slot() -> int:
             nonlocal next_scratch_slot
+            if reusable_scratch_slots:
+                return reusable_scratch_slots.pop()
+            slot = next_scratch_slot
+            next_scratch_slot += 1
+            return slot
+
+        def top_up_pending_queue(target_depth: int) -> None:
             while len(pending_queue) < target_depth:
-                slot = next_scratch_slot
+                slot = allocate_scratch_slot()
                 if not start_next_pending(slot):
+                    reusable_scratch_slots.append(slot)
                     return
-                next_scratch_slot += 1
+
+        blocking_progress_callbacks = 0
+
+        def finish_boundary_gather_maybe_direct(
+            pending: dict[str, Any]
+        ) -> tuple[
+            list[int],
+            list[tuple[list[int], list, torch.Tensor, tuple[int, ...], torch.cuda.Event | None]],
+            torch.cuda.Event | None,
+        ]:
+            direct_result = (
+                self._finish_gather_full_uneven_local_tensor_batch_async_direct_batched_ns(
+                    pending, gathered_boundary_updates, all_updates, boundary_update_indices
+                )
+            )
+            if direct_result is not None:
+                return direct_result
+            return (
+                self._finish_gather_full_uneven_local_tensor_batch_async(
+                    pending, gathered_boundary_updates
+                ),
+                [],
+                None,
+            )
+
+        def wait_boundary_gather_collective(pending: dict[str, Any]) -> bool:
+            if self.fsdp_boundary_gather_direct_batched_ns:
+                return False
+            return self._wait_gather_full_uneven_local_tensor_batch_async(pending)
+
+        def maybe_start_next_before_reconstruct(slot: int, pending: dict[str, Any]) -> bool:
+            if not self.fsdp_overlap_boundary_start_next_before_reconstruct:
+                return False
+            if not use_prefetch_scratch_scopes:
+                return False
+            with torch.autograd.profiler.record_function(
+                "Muon-FSDP phase 2b wait before early next boundary gather"
+            ):
+                if not wait_boundary_gather_collective(pending):
+                    return False
+            early_slot = allocate_scratch_slot()
+            with torch.autograd.profiler.record_function(
+                "Muon-FSDP phase 2c start next boundary gather before reconstruct"
+            ):
+                if not start_next_pending(early_slot):
+                    reusable_scratch_slots.append(early_slot)
+                    return False
+            reusable_scratch_slots.append(slot)
+            return True
 
         def progress_boundary_gathers_during_local() -> None:
+            nonlocal blocking_progress_callbacks
+            if self.fsdp_overlap_boundary_blocking_progress_interval > 0:
+                blocking_progress_callbacks += 1
+                # _apply_precomputed_muon_updates calls the progress hook once
+                # before useful NS work has run. Do not consume overlap then.
+                if blocking_progress_callbacks == 1:
+                    return
+                progress_idx = blocking_progress_callbacks - 1
+                if progress_idx % self.fsdp_overlap_boundary_blocking_progress_interval != 0:
+                    return
+                if not pending_queue:
+                    return
+                pending, slot = pending_queue.pop(0)
+                with torch.autograd.profiler.record_function(
+                    "Muon-FSDP phase 2d blocking progress boundary gather"
+                ):
+                    finished_item_indices, finished_direct_groups, ready_event = (
+                        finish_boundary_gather_maybe_direct(pending)
+                    )
+                progressed_item_indices.extend(finished_item_indices)
+                direct_boundary_groups.extend(finished_direct_groups)
+                if ready_event is not None:
+                    for item_idx in finished_item_indices:
+                        completed_item_ready_events[item_idx] = ready_event
+                start_next_pending(slot)
+                return
+
             if not self.fsdp_overlap_boundary_progress_during_local:
                 return
             while pending_queue:
@@ -3403,12 +4572,14 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 with torch.autograd.profiler.record_function(
                     "Muon-FSDP phase 2d progress completed boundary gather"
                 ):
-                    finished_item_indices = (
-                        self._finish_gather_full_uneven_local_tensor_batch_async(
-                            pending, gathered_boundary_updates
-                        )
+                    finished_item_indices, finished_direct_groups, ready_event = (
+                        finish_boundary_gather_maybe_direct(pending)
                     )
                 progressed_item_indices.extend(finished_item_indices)
+                direct_boundary_groups.extend(finished_direct_groups)
+                if ready_event is not None:
+                    for item_idx in finished_item_indices:
+                        completed_item_ready_events[item_idx] = ready_event
                 start_next_pending(slot)
 
         sort_by_work(local_only_updates)
@@ -3446,7 +4617,6 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             ):
                 top_up_pending_queue(self.fsdp_overlap_boundary_post_compute_prefetch_batches)
 
-        processed_item_indices: set[int] = set()
         deferred_boundary_updates_by_key: dict[Any, list] = {}
 
         def defer_key(update) -> tuple[str, Any] | None:
@@ -3468,10 +4638,49 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             if ready_updates:
                 self._apply_precomputed_muon_updates(ready_updates)
 
+        def process_direct_boundary_groups(
+            groups: list[
+                tuple[list[int], list, torch.Tensor, tuple[int, ...], torch.cuda.Event | None]
+            ]
+        ) -> None:
+            for item_indices, chunk, stacked_pre_ns, shape, ready_event in groups:
+                if any(item_idx in processed_item_indices for item_idx in item_indices):
+                    raise AssertionError(
+                        "Muon+M-FSDP direct boundary stack attempted to reprocess a boundary item."
+                    )
+                if ready_event is not None:
+                    with torch.autograd.profiler.record_function(
+                        "Muon-FSDP direct boundary stack ready wait"
+                    ):
+                        torch.cuda.current_stream(stacked_pre_ns.device).wait_event(ready_event)
+                with torch.autograd.profiler.record_function(
+                    "Muon-FSDP direct boundary batched NS/update "
+                    f"shape={shape} count={len(chunk)}"
+                ):
+                    orth_updates = self.scaled_orthogonalize_fn(stacked_pre_ns, None, None)
+                    if not self._try_apply_orthogonal_muon_update_foreach(chunk, orth_updates):
+                        for orth_update, (p, _, update_mode, lr, _) in zip(
+                            orth_updates.unbind(0), chunk
+                        ):
+                            self._apply_orthogonal_muon_update(p, orth_update, update_mode, lr)
+                processed_item_indices.update(item_indices)
+
         def process_completed_items(
             item_indices: set[int] | list[int], *, force: bool = False
         ) -> None:
             with torch.autograd.profiler.record_function("Muon-FSDP phase 3b boundary NS/update"):
+                ready_events = {
+                    completed_item_ready_events.pop(item_idx, None)
+                    for item_idx in item_indices
+                    if item_idx not in processed_item_indices
+                }
+                ready_events.discard(None)
+                if ready_events:
+                    with torch.autograd.profiler.record_function(
+                        f"Muon-FSDP boundary gathered tensor ready wait count={len(ready_events)}"
+                    ):
+                        for ready_event in ready_events:
+                            torch.cuda.current_stream().wait_event(ready_event)
                 completed_updates = []
                 for item_idx in item_indices:
                     if item_idx in processed_item_indices:
@@ -3482,6 +4691,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         gathered_boundary_updates[item_idx], local_pre_ns_grad
                     )
                     completed_updates.append((p, gathered_pre_ns_grad, "gather", lr, group_kwargs))
+                    gathered_boundary_updates[item_idx] = None
                     processed_item_indices.add(item_idx)
                 if self.fsdp_overlap_defer_boundary_batch_size <= 1 or force:
                     self._apply_precomputed_muon_updates(completed_updates)
@@ -3501,18 +4711,28 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 flush_deferred_boundary_updates()
 
         process_completed_items(completed_item_indices)
+        if direct_boundary_groups:
+            process_direct_boundary_groups(direct_boundary_groups)
+            direct_boundary_groups.clear()
         if progressed_item_indices:
             process_completed_items(progressed_item_indices)
 
         while pending_queue:
             pending, slot = pending_queue.pop(0)
+            started_next_before_reconstruct = maybe_start_next_before_reconstruct(slot, pending)
             with torch.autograd.profiler.record_function(
                 "Muon-FSDP phase 2b finish overlapped boundary gather"
             ):
-                finished_item_indices = self._finish_gather_full_uneven_local_tensor_batch_async(
-                    pending, gathered_boundary_updates
+                finished_item_indices, finished_direct_groups, ready_event = (
+                    finish_boundary_gather_maybe_direct(pending)
                 )
-            start_next_pending(slot)
+            if not started_next_before_reconstruct:
+                start_next_pending(slot)
+            if ready_event is not None:
+                for item_idx in finished_item_indices:
+                    completed_item_ready_events[item_idx] = ready_event
+            if finished_direct_groups:
+                process_direct_boundary_groups(finished_direct_groups)
             process_completed_items(finished_item_indices)
 
         process_completed_items(set(range(len(boundary_update_indices))), force=True)
@@ -3524,13 +4744,34 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 f"missing_boundary_item_indices={missing}."
             )
 
+        if deferred_owner_updates:
+            # Owner gather/scatter uses variable split sizes. Keep the original,
+            # rank-consistent parameter order so every rank forms identical
+            # owner chunks and all-to-all split lists.
+            deferred_owner_updates.sort(key=lambda item: item[0])
+            with torch.autograd.profiler.record_function(
+                "Muon-FSDP phase 3c deferred owner compute/scatter"
+            ):
+                if pending_owner_states is not None:
+                    pending_updates = sum(len(state["chunk"]) for state in pending_owner_states)
+                    if pending_updates != len(deferred_owner_updates):
+                        raise AssertionError(
+                            "Async owner-compute/scatter state/update mismatch: "
+                            f"pending={pending_updates}, deferred={len(deferred_owner_updates)}."
+                        )
+                    self._finish_async_owner_compute_scatter_gathers(pending_owner_states)
+                else:
+                    self._apply_precomputed_muon_updates(
+                        [update for _, update in deferred_owner_updates]
+                    )
+
         if deferred_distributed_updates:
             deferred_distributed_updates.sort(
                 key=lambda item: self._local_update_work_estimate(item[1][0], item[1][1]),
                 reverse=True,
             )
             with torch.autograd.profiler.record_function(
-                "Muon-FSDP phase 3c deferred distributed NS/update"
+                "Muon-FSDP phase 3d deferred distributed NS/update"
             ):
                 self._apply_precomputed_muon_updates(
                     [update for _, update in deferred_distributed_updates]
@@ -3538,7 +4779,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
         if async_partial_pending_chunks:
             with torch.autograd.profiler.record_function(
-                "Muon-FSDP phase 3d async partial distributed NS/update"
+                "Muon-FSDP phase 3e async partial distributed NS/update"
             ):
                 self._finish_async_partial_distributed_gathers(async_partial_pending_chunks)
 
@@ -4299,6 +5540,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return "distributed"
         if self._get_fsdp_partial_distributed_ns_plan(param) is not None:
             return "partial_distributed"
+        if self._get_fsdp_owner_compute_scatter_plan(param) is not None:
+            return "owner"
         if self.fsdp_approx_local_boundary_update:
             if self.fsdp_approx_local_boundary_exclude_qkv and self._is_split_qkv_param(param):
                 return "gather"
@@ -4310,6 +5553,23 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 return "gather"
             return "local_boundary"
         return "gather"
+
+    def _get_fsdp_owner_compute_scatter_plan(self, dtensor_ref) -> dict[str, Any] | None:
+        if not self.fsdp_boundary_owner_compute_scatter:
+            return None
+        if self.fsdp_boundary_gather_dtype not in ("fp32", "bf16"):
+            return None
+        if self._tp_partition_dim_for_param(dtensor_ref) is not None:
+            return None
+        plan = self._get_uneven_gather_plan(dtensor_ref)
+        if plan is None:
+            return None
+        flat_plan = self._get_flat_uneven_gather_plan(dtensor_ref, plan, require_flat_enabled=False)
+        if flat_plan is None:
+            return None
+        if not flat_plan["flat_sorted_is_contiguous_full_order"]:
+            return None
+        return flat_plan
 
     def _distributed_fsdp_orthogonalize(
         self, p: torch.Tensor, pre_ns_grad: torch.Tensor, group_kwargs: dict[str, Any]
@@ -4662,6 +5922,89 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         _assert_chunks_cover_full_tensor(dtensor_ref.shape, plan["chunk_infos"], assigned_numel)
         return full_tensor
 
+    def _reconstruct_full_tensor_from_final_stage_buffers_out(
+        self,
+        dtensor_ref,
+        plan: dict[str, Any],
+        stage_idx: int,
+        rank_buffers: list[torch.Tensor],
+        rank_buffer_offsets: list[int],
+        out: torch.Tensor,
+    ) -> None:
+        if tuple(out.shape) != tuple(dtensor_ref.shape):
+            raise AssertionError(
+                "Direct uneven DTensor reconstruction output shape mismatch: "
+                f"got={tuple(out.shape)}, expected={tuple(dtensor_ref.shape)}."
+            )
+        if stage_idx != len(plan["stages"]) - 1:
+            raise AssertionError(
+                "Direct uneven DTensor reconstruction requires the final gather stage: "
+                f"got stage={stage_idx}, final={len(plan['stages']) - 1}."
+            )
+
+        stage = plan["stages"][stage_idx]
+        if len(rank_buffers) != len(stage["rank_numels"]):
+            raise AssertionError(
+                "Uneven DTensor reconstruction rank buffer count mismatch: "
+                f"got {len(rank_buffers)}, expected {len(stage['rank_numels'])}."
+            )
+
+        rank_chunk_counts = stage["rank_chunk_counts"]
+        if self.fsdp_fast_reconstruct and plan["is_contiguous_full_order"]:
+            out_flat = out.view(-1)
+            chunks = []
+            assigned_numel = 0
+            for rank, rank_buffer in enumerate(rank_buffers):
+                rank_numel = stage["rank_numels"][rank]
+                if rank_numel == 0:
+                    continue
+                source_offset = rank_buffer_offsets[rank]
+                chunks.append(rank_buffer[source_offset : source_offset + rank_numel])
+                assigned_numel += rank_numel
+            if assigned_numel != plan["full_numel"]:
+                raise AssertionError(
+                    "Fast direct uneven DTensor reconstruction did not cover the full tensor: "
+                    f"assigned={assigned_numel}, expected={plan['full_numel']}."
+                )
+            if len(chunks) == 1:
+                out_flat.copy_(chunks[0])
+            elif chunks:
+                torch.cat(chunks, out=out_flat)
+            return
+
+        assigned_numel = 0
+        chunk_info_idx = 0
+        for rank, rank_buffer in enumerate(rank_buffers):
+            source_offset = rank_buffer_offsets[rank]
+            expected_source_end = source_offset + stage["rank_numels"][rank]
+            for _ in range(rank_chunk_counts[rank]):
+                chunk_info = plan["chunk_infos"][chunk_info_idx]
+                chunk_info_idx += 1
+                chunk_shape = chunk_info["shape"]
+                chunk_numel = chunk_info["numel"]
+                if chunk_numel == 0:
+                    continue
+                gathered_tensor = rank_buffer[source_offset : source_offset + chunk_numel]
+                source_offset += chunk_numel
+                offset = chunk_info["offset"]
+                slices = tuple(slice(o, o + s) for o, s in zip(offset, chunk_shape))
+                out[slices].copy_(gathered_tensor.view(chunk_shape))
+                assigned_numel += chunk_numel
+            if source_offset != expected_source_end:
+                raise AssertionError(
+                    "Direct batched uneven DTensor reconstruction consumed an unexpected rank "
+                    f"size: rank={rank}, "
+                    f"consumed={source_offset - rank_buffer_offsets[rank]}, "
+                    f"expected={stage['rank_numels'][rank]}."
+                )
+
+        if chunk_info_idx != len(plan["chunk_infos"]):
+            raise AssertionError(
+                "Direct batched uneven DTensor reconstruction consumed an unexpected chunk "
+                f"count: consumed={chunk_info_idx}, expected={len(plan['chunk_infos'])}."
+            )
+        _assert_chunks_cover_full_tensor(dtensor_ref.shape, plan["chunk_infos"], assigned_numel)
+
     def _reconstruct_full_tensor_from_flat_rank_buffers(
         self,
         dtensor_ref,
@@ -4720,6 +6063,66 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
         _assert_chunks_cover_full_tensor(dtensor_ref.shape, flat_chunk_infos, assigned_numel)
         return full_tensor
+
+    def _reconstruct_full_tensor_from_flat_rank_buffers_out(
+        self,
+        dtensor_ref,
+        flat_plan: dict[str, Any],
+        rank_buffers: list[torch.Tensor],
+        rank_buffer_offsets: list[int],
+        out: torch.Tensor,
+    ) -> None:
+        if tuple(out.shape) != tuple(dtensor_ref.shape):
+            raise AssertionError(
+                "Flat uneven DTensor reconstruction output shape mismatch: "
+                f"got={tuple(out.shape)}, expected={tuple(dtensor_ref.shape)}."
+            )
+
+        flat_chunk_infos = flat_plan["flat_chunk_infos"]
+        flat_rank_numels = flat_plan["flat_rank_numels"]
+        if len(rank_buffers) != len(flat_rank_numels):
+            raise AssertionError(
+                "Flat uneven DTensor reconstruction rank buffer count mismatch: "
+                f"got {len(rank_buffers)}, expected {len(flat_rank_numels)}."
+            )
+
+        if self.fsdp_fast_reconstruct and flat_plan["flat_sorted_is_contiguous_full_order"]:
+            out_flat = out.view(-1)
+            chunks = []
+            assigned_numel = 0
+            for rank in flat_plan["flat_sorted_rank_indices"]:
+                chunk_numel = flat_rank_numels[rank]
+                if chunk_numel == 0:
+                    continue
+                source_offset = rank_buffer_offsets[rank]
+                chunks.append(rank_buffers[rank][source_offset : source_offset + chunk_numel])
+                assigned_numel += chunk_numel
+            expected_numel = torch.Size(dtensor_ref.shape).numel()
+            if assigned_numel != expected_numel:
+                raise AssertionError(
+                    "Fast flat direct uneven DTensor reconstruction did not cover the full tensor: "
+                    f"assigned={assigned_numel}, expected={expected_numel}."
+                )
+            if len(chunks) == 1:
+                out_flat.copy_(chunks[0])
+            elif chunks:
+                torch.cat(chunks, out=out_flat)
+            return
+
+        assigned_numel = 0
+        for rank, (rank_buffer, chunk_info) in enumerate(zip(rank_buffers, flat_chunk_infos)):
+            chunk_shape = chunk_info["shape"]
+            chunk_numel = chunk_info["numel"]
+            if chunk_numel == 0:
+                continue
+            source_offset = rank_buffer_offsets[rank]
+            gathered_tensor = rank_buffer[source_offset : source_offset + chunk_numel]
+            offset = chunk_info["offset"]
+            slices = tuple(slice(o, o + s) for o, s in zip(offset, chunk_shape))
+            out[slices].copy_(gathered_tensor.view(chunk_shape))
+            assigned_numel += chunk_numel
+
+        _assert_chunks_cover_full_tensor(dtensor_ref.shape, flat_chunk_infos, assigned_numel)
 
     def _gather_full_uneven_local_tensor_like(
         self, dtensor_ref, local_tensor: torch.Tensor
@@ -5103,6 +6506,142 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             "use_padded_all_gather": use_padded_all_gather,
         }
 
+    def _prepare_flat_uneven_gather_batch_direct_pre_ns(
+        self,
+        items: list[tuple[torch.Tensor, torch.Tensor]],
+        batch: dict[str, Any],
+        all_updates: list,
+        boundary_update_indices: list[int],
+    ) -> dict[str, Any]:
+        with torch.autograd.profiler.record_function(
+            "Muon-FSDP flat gather direct pre-NS into pack buffer"
+        ):
+            item_indices = batch["item_indices"]
+            flat_plans = batch["flat_plans"]
+            flat_group = flat_plans[0]["flat_group"]
+            group_size = flat_plans[0]["flat_group_size"]
+            group_rank = flat_plans[0]["flat_group_rank"]
+            collective_rank_indices = batch.get(
+                "flat_collective_rank_indices", tuple(range(group_size))
+            )
+            collective_group = (
+                flat_plans[0]["flat_active_group"]
+                if self.fsdp_flat_batched_all_gather_nonempty_group
+                else flat_group
+            )
+            participates = group_rank in collective_rank_indices
+
+            expected_item_numels = [
+                flat_plan["flat_rank_numels"][group_rank] for flat_plan in flat_plans
+            ]
+            expected_local_numel = sum(expected_item_numels)
+            local_buffer = self._get_fsdp_gather_scratch_tensor(
+                (
+                    "direct_pre_ns_flat_batch_local_buffer",
+                    id(flat_group),
+                    batch["dtype"],
+                    batch["device"],
+                ),
+                expected_local_numel,
+                dtype=batch["dtype"],
+                device=batch["device"],
+            )
+            prewire_buffers: dict[torch.dtype, torch.Tensor] = {}
+
+            local_offset = 0
+            for batch_item_idx, (item_idx, expected_numel) in enumerate(
+                zip(item_indices, expected_item_numels)
+            ):
+                dtensor_ref, local_tensor_ref = items[item_idx]
+                if local_tensor_ref.numel() != expected_numel:
+                    raise AssertionError(
+                        "Direct flat Muon+M-FSDP boundary pre-NS gather item size mismatch: "
+                        f"item={batch_item_idx}, got={local_tensor_ref.numel()}, "
+                        f"expected={expected_numel}."
+                    )
+                update_idx = boundary_update_indices[item_idx]
+                p, _, update_mode, lr, group_kwargs = all_updates[update_idx]
+                if p is not dtensor_ref:
+                    raise AssertionError(
+                        "Direct flat Muon+M-FSDP boundary pre-NS gather item/update mismatch."
+                    )
+                target_flat = local_buffer[local_offset : local_offset + expected_numel]
+                mom_local = self.state[p]["momentum_buffer"]._local_tensor
+                if expected_numel == 0:
+                    ref_dtype = mom_local.dtype
+                    ref_device = mom_local.device
+                elif target_flat.dtype == mom_local.dtype:
+                    target = target_flat.view(mom_local.shape)
+                    self._compute_local_pre_ns_grad(p, group_kwargs, lr, out=target)
+                    ref_dtype = target.dtype
+                    ref_device = target.device
+                else:
+                    prewire_buffer = prewire_buffers.get(mom_local.dtype)
+                    if prewire_buffer is None:
+                        prewire_buffer = self._get_fsdp_gather_scratch_tensor(
+                            (
+                                "direct_pre_ns_flat_batch_prewire_buffer",
+                                id(flat_group),
+                                mom_local.dtype,
+                                batch["device"],
+                            ),
+                            expected_local_numel,
+                            dtype=mom_local.dtype,
+                            device=batch["device"],
+                        )
+                        prewire_buffers[mom_local.dtype] = prewire_buffer
+                    prewire_flat = prewire_buffer[local_offset : local_offset + expected_numel]
+                    prewire = prewire_flat.view(mom_local.shape)
+                    self._compute_local_pre_ns_grad(p, group_kwargs, lr, out=prewire)
+                    target_flat.copy_(prewire_flat)
+                    ref_dtype = prewire.dtype
+                    ref_device = prewire.device
+                pre_ns_ref = torch.empty(0, dtype=ref_dtype, device=ref_device)
+                all_updates[update_idx] = (p, pre_ns_ref, update_mode, lr, group_kwargs)
+                local_offset += expected_numel
+
+            if local_offset != expected_local_numel:
+                raise AssertionError(
+                    "Direct flat Muon+M-FSDP boundary pre-NS gather local buffer size mismatch: "
+                    f"packed={local_offset}, expected={expected_local_numel}."
+                )
+
+            rank_offsets: list[list[int]] = []
+            rank_total_numels: list[int] = []
+            for rank in range(group_size):
+                offsets = []
+                total_numel = 0
+                for flat_plan in flat_plans:
+                    offsets.append(total_numel)
+                    total_numel += flat_plan["flat_rank_numels"][rank]
+                rank_offsets.append(offsets)
+                rank_total_numels.append(total_numel)
+
+            if rank_total_numels != batch["flat_rank_total_numels"]:
+                raise AssertionError(
+                    "Direct flat batched uneven DTensor gather rank totals changed after batching."
+                )
+
+            collective_rank_total_numels = batch.get(
+                "flat_collective_rank_total_numels", rank_total_numels
+            )
+            use_padded_all_gather = self._batch_uses_padded_all_gather(collective_rank_total_numels)
+        return {
+            "batch": batch,
+            "plans": batch["plans"],
+            "flat_plans": flat_plans,
+            "stage_idx": 0,
+            "shard_group": collective_group,
+            "group_size": group_size,
+            "rank_offsets": rank_offsets,
+            "rank_total_numels": rank_total_numels,
+            "collective_rank_indices": collective_rank_indices,
+            "collective_rank_total_numels": collective_rank_total_numels,
+            "local_buffer": local_buffer,
+            "participates": participates,
+            "use_padded_all_gather": use_padded_all_gather,
+        }
+
     def _store_flat_uneven_gather_batch_results(
         self,
         items: list[tuple[torch.Tensor, torch.Tensor]],
@@ -5129,6 +6668,157 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 full_tensor, local_tensor, batch, batch_item_idx
             )
         return batch["item_indices"]
+
+    def _store_flat_uneven_gather_batch_results_direct_batched_ns(
+        self,
+        items: list[tuple[torch.Tensor, torch.Tensor]],
+        results: list[torch.Tensor | None],
+        batch: dict[str, Any],
+        pending_stage: dict[str, Any],
+        all_updates: list,
+        boundary_update_indices: list[int],
+    ) -> tuple[
+        list[int],
+        list[tuple[list[int], list, torch.Tensor, tuple[int, ...], torch.cuda.Event | None]],
+        torch.cuda.Event | None,
+    ]:
+        item_indices = batch["item_indices"]
+        flat_plans = batch["flat_plans"]
+        rank_offsets = pending_stage["rank_offsets"]
+        rank_buffers = self._rank_buffers_from_pending_uneven_gather_stage(pending_stage)
+        fallback_item_indices: list[int] = []
+        fallback_entries: list[tuple[int, int]] = []
+        direct_group_payloads: list[tuple[list[int], list, torch.Tensor, tuple[int, ...]]] = []
+        group_order: list[
+            tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype, torch.device]
+        ] = []
+        grouped_entries: dict[
+            tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype, torch.device],
+            list[tuple[int, int, int, torch.Tensor, torch.Tensor, float, dict[str, Any]]],
+        ] = {}
+
+        def materialize_item(batch_item_idx: int, item_idx: int) -> None:
+            dtensor_ref, local_tensor = items[item_idx]
+            if local_tensor.numel() == 0:
+                results[item_idx] = None
+                fallback_item_indices.append(item_idx)
+                return
+
+            rank_buffer_offsets = [
+                rank_offsets[rank][batch_item_idx] for rank in range(pending_stage["group_size"])
+            ]
+            full_tensor = self._reconstruct_full_tensor_from_flat_rank_buffers(
+                dtensor_ref, flat_plans[batch_item_idx], rank_buffers, rank_buffer_offsets
+            )
+            results[item_idx] = self._maybe_dequantize_boundary_gather_result(
+                full_tensor, local_tensor, batch, batch_item_idx
+            )
+            fallback_item_indices.append(item_idx)
+
+        with torch.autograd.profiler.record_function(
+            "Muon-FSDP flat gather direct batched NS stack classify"
+        ):
+            for batch_item_idx, item_idx in enumerate(item_indices):
+                dtensor_ref, local_tensor = items[item_idx]
+                if local_tensor.numel() == 0:
+                    results[item_idx] = None
+                    fallback_item_indices.append(item_idx)
+                    continue
+
+                update_idx = boundary_update_indices[item_idx]
+                p, reference_tensor, update_mode, lr, group_kwargs = all_updates[update_idx]
+                if p is not dtensor_ref:
+                    raise AssertionError(
+                        "Direct flat Muon+M-FSDP boundary stack item/update mismatch."
+                    )
+                key = self._fsdp_direct_boundary_batched_ns_key(p, reference_tensor, update_mode)
+                if key is None:
+                    fallback_entries.append((batch_item_idx, item_idx))
+                    continue
+                if key not in grouped_entries:
+                    group_order.append(key)
+                grouped_entries.setdefault(key, []).append(
+                    (batch_item_idx, item_idx, update_idx, p, reference_tensor, lr, group_kwargs)
+                )
+
+        def reconstruct_payloads() -> None:
+            if fallback_entries:
+                with torch.autograd.profiler.record_function(
+                    "Muon-FSDP flat gather direct batched NS fallback reconstruct "
+                    f"count={len(fallback_entries)}"
+                ):
+                    for batch_item_idx, item_idx in fallback_entries:
+                        materialize_item(batch_item_idx, item_idx)
+
+            for key in group_order:
+                entries = grouped_entries[key]
+                _, shape, _, stack_dtype, stack_device = key
+                tensor_bytes = (
+                    int(torch.Size(shape).numel())
+                    * torch.empty((), dtype=stack_dtype).element_size()
+                )
+                max_items = max(
+                    1, self.fsdp_batched_newton_schulz_max_batch_bytes // max(1, tensor_bytes)
+                )
+                for start in range(0, len(entries), max_items):
+                    chunk_entries = entries[start : start + max_items]
+                    if len(chunk_entries) < 2:
+                        for batch_item_idx, item_idx, *_ in chunk_entries:
+                            materialize_item(batch_item_idx, item_idx)
+                        continue
+
+                    with torch.autograd.profiler.record_function(
+                        "Muon-FSDP flat gather direct batched NS stack reconstruct "
+                        f"shape={shape} count={len(chunk_entries)}"
+                    ):
+                        stacked_pre_ns = torch.empty(
+                            (len(chunk_entries),) + shape, dtype=stack_dtype, device=stack_device
+                        )
+                        chunk_item_indices = []
+                        chunk_updates = []
+                        for stack_idx, (
+                            batch_item_idx,
+                            item_idx,
+                            _,
+                            p,
+                            _,
+                            lr,
+                            group_kwargs,
+                        ) in enumerate(chunk_entries):
+                            rank_buffer_offsets = [
+                                rank_offsets[rank][batch_item_idx]
+                                for rank in range(pending_stage["group_size"])
+                            ]
+                            self._reconstruct_full_tensor_from_flat_rank_buffers_out(
+                                p,
+                                flat_plans[batch_item_idx],
+                                rank_buffers,
+                                rank_buffer_offsets,
+                                stacked_pre_ns[stack_idx],
+                            )
+                            chunk_item_indices.append(item_idx)
+                            chunk_updates.append((p, None, "gather", lr, group_kwargs))
+                        direct_group_payloads.append(
+                            (chunk_item_indices, chunk_updates, stacked_pre_ns, shape)
+                        )
+
+        ready_event = None
+        comm_stream = pending_stage.get("comm_stream")
+        if comm_stream is not None and batch["device"].type == "cuda":
+            with torch.cuda.device(batch["device"]):
+                with torch.cuda.stream(comm_stream):
+                    reconstruct_payloads()
+                    ready_event = torch.cuda.Event()
+                    ready_event.record(comm_stream)
+        else:
+            self._wait_uneven_gather_stage(pending_stage)
+            reconstruct_payloads()
+
+        direct_groups = [
+            (item_indices, chunk, stacked_pre_ns, shape, ready_event)
+            for item_indices, chunk, stacked_pre_ns, shape in direct_group_payloads
+        ]
+        return fallback_item_indices, direct_groups, ready_event
 
     def _gather_full_uneven_local_tensor_batch(
         self,
@@ -5420,6 +7110,13 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             pending["skipped_nonempty_collective"] = True
             return pending
 
+        local_buffer_ready_event = stage_state.get("local_buffer_ready_event")
+        if local_buffer_ready_event is not None:
+            if comm_stream is not None:
+                comm_stream.wait_event(local_buffer_ready_event)
+            else:
+                torch.cuda.current_stream(device).wait_event(local_buffer_ready_event)
+
         with torch.autograd.profiler.record_function(
             self._gather_collective_nvtx_label(stage_state)
         ):
@@ -5610,6 +7307,157 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             )
         return item_indices
 
+    def _store_uneven_gather_batch_results_direct_batched_ns(
+        self,
+        items: list[tuple[torch.Tensor, torch.Tensor]],
+        results: list[torch.Tensor | None],
+        batch: dict[str, Any],
+        pending_stage: dict[str, Any],
+        all_updates: list,
+        boundary_update_indices: list[int],
+    ) -> tuple[
+        list[int],
+        list[tuple[list[int], list, torch.Tensor, tuple[int, ...], torch.cuda.Event | None]],
+        torch.cuda.Event | None,
+    ]:
+        item_indices = batch["item_indices"]
+        plans = batch["plans"]
+        stage_idx = pending_stage["stage_idx"]
+        rank_offsets = pending_stage["rank_offsets"]
+        rank_buffers = self._rank_buffers_from_pending_uneven_gather_stage(pending_stage)
+        fallback_item_indices: list[int] = []
+        fallback_entries: list[tuple[int, int]] = []
+        direct_group_payloads: list[tuple[list[int], list, torch.Tensor, tuple[int, ...]]] = []
+        group_order: list[
+            tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype, torch.device]
+        ] = []
+        grouped_entries: dict[
+            tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype, torch.device],
+            list[tuple[int, int, int, torch.Tensor, torch.Tensor, float, dict[str, Any]]],
+        ] = {}
+
+        def materialize_item(batch_item_idx: int, item_idx: int) -> None:
+            dtensor_ref, local_tensor = items[item_idx]
+            if local_tensor.numel() == 0:
+                results[item_idx] = None
+                fallback_item_indices.append(item_idx)
+                return
+
+            rank_buffer_offsets = [
+                rank_offsets[rank][batch_item_idx] for rank in range(pending_stage["group_size"])
+            ]
+            full_tensor = self._reconstruct_full_tensor_from_final_stage_buffers(
+                dtensor_ref, plans[batch_item_idx], stage_idx, rank_buffers, rank_buffer_offsets
+            )
+            results[item_idx] = self._maybe_dequantize_boundary_gather_result(
+                full_tensor, local_tensor, batch, batch_item_idx
+            )
+            fallback_item_indices.append(item_idx)
+
+        with torch.autograd.profiler.record_function(
+            "Muon-FSDP gather direct batched NS stack classify"
+        ):
+            for batch_item_idx, item_idx in enumerate(item_indices):
+                dtensor_ref, local_tensor = items[item_idx]
+                if local_tensor.numel() == 0:
+                    results[item_idx] = None
+                    fallback_item_indices.append(item_idx)
+                    continue
+
+                update_idx = boundary_update_indices[item_idx]
+                p, reference_tensor, update_mode, lr, group_kwargs = all_updates[update_idx]
+                if p is not dtensor_ref:
+                    raise AssertionError("Direct Muon+M-FSDP boundary stack item/update mismatch.")
+                key = self._fsdp_direct_boundary_batched_ns_key(p, reference_tensor, update_mode)
+                if key is None:
+                    fallback_entries.append((batch_item_idx, item_idx))
+                    continue
+                if key not in grouped_entries:
+                    group_order.append(key)
+                grouped_entries.setdefault(key, []).append(
+                    (batch_item_idx, item_idx, update_idx, p, reference_tensor, lr, group_kwargs)
+                )
+
+        def reconstruct_payloads() -> None:
+            if fallback_entries:
+                with torch.autograd.profiler.record_function(
+                    "Muon-FSDP gather direct batched NS fallback reconstruct "
+                    f"count={len(fallback_entries)}"
+                ):
+                    for batch_item_idx, item_idx in fallback_entries:
+                        materialize_item(batch_item_idx, item_idx)
+
+            for key in group_order:
+                entries = grouped_entries[key]
+                _, shape, _, stack_dtype, stack_device = key
+                tensor_bytes = (
+                    int(torch.Size(shape).numel())
+                    * torch.empty((), dtype=stack_dtype).element_size()
+                )
+                max_items = max(
+                    1, self.fsdp_batched_newton_schulz_max_batch_bytes // max(1, tensor_bytes)
+                )
+                for start in range(0, len(entries), max_items):
+                    chunk_entries = entries[start : start + max_items]
+                    if len(chunk_entries) < 2:
+                        for batch_item_idx, item_idx, *_ in chunk_entries:
+                            materialize_item(batch_item_idx, item_idx)
+                        continue
+
+                    with torch.autograd.profiler.record_function(
+                        "Muon-FSDP gather direct batched NS stack reconstruct "
+                        f"shape={shape} count={len(chunk_entries)}"
+                    ):
+                        stacked_pre_ns = torch.empty(
+                            (len(chunk_entries),) + shape, dtype=stack_dtype, device=stack_device
+                        )
+                        chunk_item_indices = []
+                        chunk_updates = []
+                        for stack_idx, (
+                            batch_item_idx,
+                            item_idx,
+                            _,
+                            p,
+                            _,
+                            lr,
+                            group_kwargs,
+                        ) in enumerate(chunk_entries):
+                            rank_buffer_offsets = [
+                                rank_offsets[rank][batch_item_idx]
+                                for rank in range(pending_stage["group_size"])
+                            ]
+                            self._reconstruct_full_tensor_from_final_stage_buffers_out(
+                                p,
+                                plans[batch_item_idx],
+                                stage_idx,
+                                rank_buffers,
+                                rank_buffer_offsets,
+                                stacked_pre_ns[stack_idx],
+                            )
+                            chunk_item_indices.append(item_idx)
+                            chunk_updates.append((p, None, "gather", lr, group_kwargs))
+                        direct_group_payloads.append(
+                            (chunk_item_indices, chunk_updates, stacked_pre_ns, shape)
+                        )
+
+        ready_event = None
+        comm_stream = pending_stage.get("comm_stream")
+        if comm_stream is not None and batch["device"].type == "cuda":
+            with torch.cuda.device(batch["device"]):
+                with torch.cuda.stream(comm_stream):
+                    reconstruct_payloads()
+                    ready_event = torch.cuda.Event()
+                    ready_event.record(comm_stream)
+        else:
+            self._wait_uneven_gather_stage(pending_stage)
+            reconstruct_payloads()
+
+        direct_groups = [
+            (item_indices, chunk, stacked_pre_ns, shape, ready_event)
+            for item_indices, chunk, stacked_pre_ns, shape in direct_group_payloads
+        ]
+        return fallback_item_indices, direct_groups, ready_event
+
     def _prepare_uneven_gather_stage_direct_pre_ns(
         self,
         items: list[tuple[torch.Tensor, torch.Tensor]],
@@ -5646,67 +7494,89 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             )
             prewire_buffers: dict[torch.dtype, torch.Tensor] = {}
 
-            local_offset = 0
-            for batch_item_idx, (item_idx, expected_numel) in enumerate(
-                zip(item_indices, expected_item_numels)
-            ):
-                dtensor_ref, local_tensor_ref = items[item_idx]
-                if local_tensor_ref.numel() != expected_numel:
-                    raise AssertionError(
-                        "Direct Muon+M-FSDP boundary pre-NS gather item size mismatch: "
-                        f"item={batch_item_idx}, got={local_tensor_ref.numel()}, "
-                        f"expected={expected_numel}."
-                    )
-                update_idx = boundary_update_indices[item_idx]
-                p, _, update_mode, lr, group_kwargs = all_updates[update_idx]
-                if p is not dtensor_ref:
-                    raise AssertionError(
-                        "Direct Muon+M-FSDP boundary pre-NS gather item/update mismatch."
-                    )
-                target_flat = local_buffer[local_offset : local_offset + expected_numel]
-                mom_local = self.state[p]["momentum_buffer"]._local_tensor
-                if expected_numel == 0:
-                    ref_dtype = mom_local.dtype
-                    ref_device = mom_local.device
-                elif target_flat.dtype == mom_local.dtype:
-                    target = target_flat.view(mom_local.shape)
-                    self._compute_local_pre_ns_grad(p, group_kwargs, lr, out=target)
-                    ref_dtype = target.dtype
-                    ref_device = target.device
-                else:
-                    prewire_buffer = prewire_buffers.get(mom_local.dtype)
-                    if prewire_buffer is None:
-                        prewire_buffer = self._get_fsdp_gather_scratch_tensor(
-                            (
-                                "direct_pre_ns_batch_prewire_buffer",
-                                stage_idx,
-                                id(shard_group),
-                                mom_local.dtype,
-                                batch["device"],
-                            ),
-                            expected_local_numel,
-                            dtype=mom_local.dtype,
-                            device=batch["device"],
+            def pack_local_buffer() -> None:
+                local_offset = 0
+                for batch_item_idx, (item_idx, expected_numel) in enumerate(
+                    zip(item_indices, expected_item_numels)
+                ):
+                    dtensor_ref, local_tensor_ref = items[item_idx]
+                    if local_tensor_ref.numel() != expected_numel:
+                        raise AssertionError(
+                            "Direct Muon+M-FSDP boundary pre-NS gather item size mismatch: "
+                            f"item={batch_item_idx}, got={local_tensor_ref.numel()}, "
+                            f"expected={expected_numel}."
                         )
-                        prewire_buffers[mom_local.dtype] = prewire_buffer
-                    prewire_flat = prewire_buffer[local_offset : local_offset + expected_numel]
-                    prewire = prewire_flat.view(mom_local.shape)
-                    self._compute_local_pre_ns_grad(p, group_kwargs, lr, out=prewire)
-                    target_flat.copy_(prewire_flat)
-                    ref_dtype = prewire.dtype
-                    ref_device = prewire.device
-                # The packed scratch view can be reused before the completed
-                # boundary update is processed.  Keep only a tiny dtype/device
-                # reference for restoring the gathered wire dtype before exact NS.
-                pre_ns_ref = torch.empty(0, dtype=ref_dtype, device=ref_device)
-                all_updates[update_idx] = (p, pre_ns_ref, update_mode, lr, group_kwargs)
-                local_offset += expected_numel
+                    update_idx = boundary_update_indices[item_idx]
+                    p, _, update_mode, lr, group_kwargs = all_updates[update_idx]
+                    if p is not dtensor_ref:
+                        raise AssertionError(
+                            "Direct Muon+M-FSDP boundary pre-NS gather item/update mismatch."
+                        )
+                    target_flat = local_buffer[local_offset : local_offset + expected_numel]
+                    mom_local = self.state[p]["momentum_buffer"]._local_tensor
+                    if expected_numel == 0:
+                        ref_dtype = mom_local.dtype
+                        ref_device = mom_local.device
+                    elif target_flat.dtype == mom_local.dtype:
+                        target = target_flat.view(mom_local.shape)
+                        self._compute_local_pre_ns_grad(p, group_kwargs, lr, out=target)
+                        ref_dtype = target.dtype
+                        ref_device = target.device
+                    else:
+                        prewire_buffer = prewire_buffers.get(mom_local.dtype)
+                        if prewire_buffer is None:
+                            prewire_buffer = self._get_fsdp_gather_scratch_tensor(
+                                (
+                                    "direct_pre_ns_batch_prewire_buffer",
+                                    stage_idx,
+                                    id(shard_group),
+                                    mom_local.dtype,
+                                    batch["device"],
+                                ),
+                                expected_local_numel,
+                                dtype=mom_local.dtype,
+                                device=batch["device"],
+                            )
+                            prewire_buffers[mom_local.dtype] = prewire_buffer
+                        prewire_flat = prewire_buffer[local_offset : local_offset + expected_numel]
+                        prewire = prewire_flat.view(mom_local.shape)
+                        self._compute_local_pre_ns_grad(p, group_kwargs, lr, out=prewire)
+                        target_flat.copy_(prewire_flat)
+                        ref_dtype = prewire.dtype
+                        ref_device = prewire.device
+                    # The packed scratch view can be reused before the completed
+                    # boundary update is processed.  Keep only a tiny dtype/device
+                    # reference for restoring the gathered wire dtype before exact NS.
+                    pre_ns_ref = torch.empty(0, dtype=ref_dtype, device=ref_device)
+                    all_updates[update_idx] = (p, pre_ns_ref, update_mode, lr, group_kwargs)
+                    local_offset += expected_numel
 
-            if local_offset != expected_local_numel:
-                raise AssertionError(
-                    "Direct Muon+M-FSDP boundary pre-NS gather local buffer size mismatch: "
-                    f"packed={local_offset}, expected={expected_local_numel}."
-                )
+                if local_offset != expected_local_numel:
+                    raise AssertionError(
+                        "Direct Muon+M-FSDP boundary pre-NS gather local buffer size mismatch: "
+                        f"packed={local_offset}, expected={expected_local_numel}."
+                    )
+
+            local_buffer_ready_event = None
+            ready_event = batch.get("_boundary_ready_event")
+            use_pack_stream = (
+                self.fsdp_boundary_pre_ns_pack_stream
+                and batch["device"].type == "cuda"
+                and ready_event is not None
+            )
+            if use_pack_stream:
+                with torch.cuda.device(batch["device"]):
+                    pack_stream = self._get_fsdp_pack_stream(batch["device"])
+                    with torch.cuda.stream(pack_stream):
+                        pack_stream.wait_event(ready_event)
+                        pack_local_buffer()
+                        local_buffer.record_stream(pack_stream)
+                        for prewire_buffer in prewire_buffers.values():
+                            prewire_buffer.record_stream(pack_stream)
+                        local_buffer_ready_event = torch.cuda.Event()
+                        local_buffer_ready_event.record(pack_stream)
+            else:
+                pack_local_buffer()
 
             rank_offsets: list[list[int]] = []
             rank_total_numels: list[int] = []
@@ -5729,6 +7599,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             "rank_offsets": rank_offsets,
             "rank_total_numels": rank_total_numels,
             "local_buffer": local_buffer,
+            "local_buffer_ready_event": local_buffer_ready_event,
             "use_padded_all_gather": use_padded_all_gather,
         }
 
@@ -5746,14 +7617,16 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 raise AssertionError(
                     "Direct Muon+M-FSDP boundary pre-NS gather requires boundary update indices."
                 )
+            if direct_pre_ns and self.fsdp_boundary_pre_ns_pack_stream:
+                self._ensure_boundary_ready_event(batch)
             if batch.get("is_flat", False):
-                if direct_pre_ns:
-                    raise AssertionError(
-                        "Direct Muon+M-FSDP boundary pre-NS gather-buffer path "
-                        "does not yet support flat gather batches."
-                    )
                 with torch.autograd.profiler.record_function("Muon-FSDP flat gather pack"):
-                    stage_state = self._prepare_flat_uneven_gather_batch(items, batch)
+                    if direct_pre_ns:
+                        stage_state = self._prepare_flat_uneven_gather_batch_direct_pre_ns(
+                            items, batch, all_updates, boundary_update_indices
+                        )
+                    else:
+                        stage_state = self._prepare_flat_uneven_gather_batch(items, batch)
                 pending_stage = self._start_uneven_gather_stage(stage_state, async_op=True)
                 return {"items": items, "batch": batch, "pending_flat_stage": pending_stage}
 
@@ -5847,6 +7720,73 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 )
             pending_stage = self._start_uneven_gather_stage(stage_state, async_op=True)
             return {"items": items, "batch": batch, "pending_stage": pending_stage}
+
+    def _finish_gather_full_uneven_local_tensor_batch_async_direct_batched_ns(
+        self,
+        pending: dict[str, Any],
+        results: list[torch.Tensor | None],
+        all_updates: list,
+        boundary_update_indices: list[int],
+    ) -> (
+        tuple[
+            list[int],
+            list[tuple[list[int], list, torch.Tensor, tuple[int, ...], torch.cuda.Event | None]],
+            torch.cuda.Event | None,
+        ]
+        | None
+    ):
+        if not self.fsdp_boundary_gather_direct_batched_ns:
+            return None
+
+        batch = pending["batch"]
+        with self._with_fsdp_gather_scratch_scope(batch.get("_scratch_scope")):
+            items = pending["items"]
+            plans = batch["plans"]
+            if "pending_flat_stage" in pending:
+                return self._store_flat_uneven_gather_batch_results_direct_batched_ns(
+                    items,
+                    results,
+                    batch,
+                    pending["pending_flat_stage"],
+                    all_updates,
+                    boundary_update_indices,
+                )
+            if "final_pending_stage" in pending:
+                for pending_stage in pending["pending_stages"]:
+                    self._wait_uneven_gather_stage(pending_stage)
+                final_pending_stage = pending["final_pending_stage"]
+                return self._store_uneven_gather_batch_results_direct_batched_ns(
+                    items, results, batch, final_pending_stage, all_updates, boundary_update_indices
+                )
+
+            final_stage_idx = len(plans[0]["stages"]) - 1
+            if final_stage_idx != 0:
+                return None
+
+            pending_stage = pending["pending_stage"]
+            return self._store_uneven_gather_batch_results_direct_batched_ns(
+                items, results, batch, pending_stage, all_updates, boundary_update_indices
+            )
+
+    def _wait_gather_full_uneven_local_tensor_batch_async(self, pending: dict[str, Any]) -> bool:
+        if "pending_flat_stage" in pending:
+            self._wait_uneven_gather_stage(pending["pending_flat_stage"])
+            return True
+
+        if "final_pending_stage" in pending:
+            for pending_stage in pending["pending_stages"]:
+                self._wait_uneven_gather_stage(pending_stage)
+            self._wait_uneven_gather_stage(pending["final_pending_stage"])
+            return True
+
+        if "pending_stage" in pending:
+            plans = pending["batch"]["plans"]
+            final_stage_idx = len(plans[0]["stages"]) - 1
+            if final_stage_idx == 0:
+                self._wait_uneven_gather_stage(pending["pending_stage"])
+                return True
+
+        return False
 
     def _finish_gather_full_uneven_local_tensor_batch_async(
         self, pending: dict[str, Any], results: list[torch.Tensor | None]

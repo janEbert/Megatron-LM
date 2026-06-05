@@ -337,6 +337,46 @@ class OptimizerConfig:
     stage-0 pack copy for eligible overlapped boundary gathers. Defaults to False.
     """
 
+    muon_fsdp_boundary_pre_ns_pack_stream: bool = False
+    """If True, launch exact direct boundary pre-Newton-Schulz packing on a separate CUDA stream
+    and make the all-gather stream wait on a per-batch ready event. This preserves optimizer math
+    while allowing later boundary pre-NS packs to overlap earlier boundary all-gathers.
+    """
+
+    muon_fsdp_boundary_gather_direct_batched_ns: bool = False
+    """If True, compact eligible completed boundary gathers directly into the batched
+    Newton-Schulz input stack instead of first materializing per-item full tensors and then
+    stacking them. This preserves exact gathered Muon math and is opt-in.
+    """
+
+    muon_fsdp_boundary_owner_compute_scatter: bool = False
+    """If True, route eligible exact boundary pre-Newton-Schulz shards to deterministic
+    owner ranks, compute the same full-matrix Newton-Schulz update once on each owner, and
+    scatter exact local update slices back to shard ranks. This is opt-in and preserves the
+    gathered Muon math for eligible flat FSDP layouts.
+    """
+
+    muon_fsdp_owner_compute_scatter_single_batch: bool = False
+    """If True, do not split owner-compute/scatter updates by the regular boundary
+    gather byte cap. This preserves exact owner-compute math and reduces serial
+    all-to-all chunk count at the cost of larger temporary owner send/recv buffers.
+    """
+
+    muon_fsdp_owner_compute_scatter_async_gather: bool = False
+    """If True, start exact owner-compute/scatter all-to-all gathers on a duplicate
+    FSDP communicator before local Newton-Schulz work drains the regular boundary
+    gather pipeline. The owner full-NS compute and scatter still run in the existing
+    deferred owner phase, so this is an exact scheduling-only experiment.
+    """
+
+    muon_fsdp_owner_compute_scatter_async_scatter: bool = False
+    """If True, launch exact owner-compute/scatter shard-return all-to-alls
+    asynchronously after each owner chunk's full Newton-Schulz compute, then
+    apply returned shards after all chunk scatters are queued. This preserves the
+    owner update math and lets scatter for chunk i overlap full-NS compute for
+    chunk i + 1.
+    """
+
     muon_fsdp_boundary_batch_sort_by_size: bool = False
     """If True, deterministically launch larger Muon+M-FSDP boundary gather batches first within
     each identical communicator/stage group. This preserves per-communicator collective order and
@@ -474,11 +514,31 @@ class OptimizerConfig:
     This preserves the norm-ratio formula and only changes stream scheduling.
     """
 
+    muon_fsdp_approx_local_boundary_threaded_norm_all_reduce: bool = False
+    """If True, launch approximate local-boundary global-norm reductions from a
+    background host thread on the Muon FSDP communication stream. This preserves
+    the norm-ratio formula and attempts to overlap Python/NCCL launch and
+    reduction time with local Newton-Schulz work.
+    """
+
+    muon_fsdp_approx_local_boundary_defer_norm_scaled_apply: bool = False
+    """If True, compute batched approximate local-boundary Newton-Schulz outputs
+    before waiting for async global-norm scale ratios, then apply the same
+    norm-scaled updates after the ratios are ready. This preserves the norm-ratio
+    formula and only changes scheduling/lifetime of independent updates.
+    """
+
     muon_fsdp_batched_qkv_local_boundary: bool = False
     """If True, allow split-QKV tensors on the approximate local-boundary path
     to use the batched split-QKV Newton-Schulz path when their local shard layout
     is eligible. This remains opt-in because local boundary QKV shards may not be
     aligned to full QKV split groups.
+    """
+
+    muon_fsdp_batched_unsplit_qkv_local_boundary: bool = False
+    """If True, batch eligible split-QKV approximate local-boundary tensors as
+    full unsplit matrices. This preserves the current full-matrix QKV update
+    while reducing per-parameter Newton-Schulz launches.
     """
 
     muon_fsdp_overlap_local_ns_first: bool = False
@@ -510,10 +570,24 @@ class OptimizerConfig:
     the top-up. The optimizer math is unchanged.
     """
 
+    muon_fsdp_overlap_boundary_start_next_before_reconstruct: bool = False
+    """If True, wait for a completed boundary gather collective, launch the next boundary
+    gather into a spare scratch slot, and only then reconstruct/process the completed batch.
+    This preserves optimizer math while overlapping reconstruction and boundary NS with the
+    next collective at the cost of one additional gather scratch slot.
+    """
+
     muon_fsdp_overlap_boundary_progress_during_local: bool = False
     """If True, poll the oldest queued Muon+M-FSDP boundary gather between batched local
     Newton-Schulz chunks and start the next gather batch when it is complete. This only
     changes scheduling and preserves the optimizer math.
+    """
+
+    muon_fsdp_overlap_boundary_blocking_progress_interval: int = 0
+    """If greater than zero, force-complete the oldest queued Muon+M-FSDP boundary
+    gather after this many batched Newton-Schulz progress points while local or
+    distributed work runs under the gather. All ranks progress the same pending
+    gather order, so optimizer math and collective ordering are unchanged.
     """
 
     muon_fsdp_overlap_defer_boundary_batch_size: int = 1
@@ -535,6 +609,11 @@ class OptimizerConfig:
     muon_fsdp_batched_distributed_newton_schulz_max_batch_bytes: int = 0
     """Approximate maximum Gram bytes per batched distributed Muon+M-FSDP Newton-Schulz
     chunk. A value of 0 reuses muon_fsdp_batched_newton_schulz_max_batch_bytes.
+    """
+
+    muon_fsdp_reuse_batched_newton_schulz_workspace: bool = False
+    """If True, reuse scratch tensors for batched Muon+M-FSDP Newton-Schulz stack
+    inputs. This preserves optimizer math and only changes temporary allocation reuse.
     """
 
     muon_fsdp_defer_local_pre_ns_to_batched_ns: bool = False
