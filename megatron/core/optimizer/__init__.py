@@ -764,6 +764,24 @@ def _get_muon_fsdp_kwargs(config: OptimizerConfig) -> dict[str, Any]:
         "fsdp_boundary_pre_ns_into_gather_buffer": getattr(
             config, "muon_fsdp_boundary_pre_ns_into_gather_buffer", False
         ),
+        "fsdp_boundary_pre_ns_pack_stream": getattr(
+            config, "muon_fsdp_boundary_pre_ns_pack_stream", False
+        ),
+        "fsdp_boundary_gather_direct_batched_ns": getattr(
+            config, "muon_fsdp_boundary_gather_direct_batched_ns", False
+        ),
+        "fsdp_boundary_owner_compute_scatter": getattr(
+            config, "muon_fsdp_boundary_owner_compute_scatter", False
+        ),
+        "fsdp_owner_compute_scatter_single_batch": getattr(
+            config, "muon_fsdp_owner_compute_scatter_single_batch", False
+        ),
+        "fsdp_owner_compute_scatter_async_gather": getattr(
+            config, "muon_fsdp_owner_compute_scatter_async_gather", False
+        ),
+        "fsdp_owner_compute_scatter_async_scatter": getattr(
+            config, "muon_fsdp_owner_compute_scatter_async_scatter", False
+        ),
         "fsdp_boundary_batch_sort_by_size": getattr(
             config, "muon_fsdp_boundary_batch_sort_by_size", False
         ),
@@ -823,8 +841,17 @@ def _get_muon_fsdp_kwargs(config: OptimizerConfig) -> dict[str, Any]:
         "fsdp_approx_local_boundary_async_norm_all_reduce": getattr(
             config, "muon_fsdp_approx_local_boundary_async_norm_all_reduce", False
         ),
+        "fsdp_approx_local_boundary_threaded_norm_all_reduce": getattr(
+            config, "muon_fsdp_approx_local_boundary_threaded_norm_all_reduce", False
+        ),
+        "fsdp_approx_local_boundary_defer_norm_scaled_apply": getattr(
+            config, "muon_fsdp_approx_local_boundary_defer_norm_scaled_apply", False
+        ),
         "fsdp_batched_qkv_local_boundary": getattr(
             config, "muon_fsdp_batched_qkv_local_boundary", False
+        ),
+        "fsdp_batched_unsplit_qkv_local_boundary": getattr(
+            config, "muon_fsdp_batched_unsplit_qkv_local_boundary", False
         ),
         "fsdp_overlap_local_ns_first": getattr(config, "muon_fsdp_overlap_local_ns_first", False),
         "fsdp_overlap_comm_compute": getattr(config, "muon_fsdp_overlap_comm_compute", False),
@@ -837,8 +864,14 @@ def _get_muon_fsdp_kwargs(config: OptimizerConfig) -> dict[str, Any]:
         "fsdp_overlap_boundary_post_compute_prefetch_batches": getattr(
             config, "muon_fsdp_overlap_boundary_post_compute_prefetch_batches", 0
         ),
+        "fsdp_overlap_boundary_start_next_before_reconstruct": getattr(
+            config, "muon_fsdp_overlap_boundary_start_next_before_reconstruct", False
+        ),
         "fsdp_overlap_boundary_progress_during_local": getattr(
             config, "muon_fsdp_overlap_boundary_progress_during_local", False
+        ),
+        "fsdp_overlap_boundary_blocking_progress_interval": getattr(
+            config, "muon_fsdp_overlap_boundary_blocking_progress_interval", 0
         ),
         "fsdp_overlap_defer_boundary_batch_size": getattr(
             config, "muon_fsdp_overlap_defer_boundary_batch_size", 1
@@ -852,6 +885,9 @@ def _get_muon_fsdp_kwargs(config: OptimizerConfig) -> dict[str, Any]:
         ),
         "fsdp_batched_distributed_newton_schulz_max_batch_bytes": getattr(
             config, "muon_fsdp_batched_distributed_newton_schulz_max_batch_bytes", 0
+        ),
+        "fsdp_reuse_batched_newton_schulz_workspace": getattr(
+            config, "muon_fsdp_reuse_batched_newton_schulz_workspace", False
         ),
         "fsdp_defer_local_pre_ns_to_batched_ns": getattr(
             config, "muon_fsdp_defer_local_pre_ns_to_batched_ns", False
