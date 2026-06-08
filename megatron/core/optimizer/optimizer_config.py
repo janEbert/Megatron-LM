@@ -356,6 +356,12 @@ class OptimizerConfig:
     gathered Muon math for eligible flat FSDP layouts.
     """
 
+    muon_fsdp_owner_compute_scatter_general_layout: bool = False
+    """If True, allow exact owner-compute/scatter for general rectangular FSDP shard
+    layouts, including TP-column-sharded boundary tensors. The owner reconstructs from
+    chunk metadata instead of requiring a contiguous row-sharded flat layout.
+    """
+
     muon_fsdp_owner_compute_scatter_single_batch: bool = False
     """If True, do not split owner-compute/scatter updates by the regular boundary
     gather byte cap. This preserves exact owner-compute math and reduces serial

@@ -773,6 +773,9 @@ def _get_muon_fsdp_kwargs(config: OptimizerConfig) -> dict[str, Any]:
         "fsdp_boundary_owner_compute_scatter": getattr(
             config, "muon_fsdp_boundary_owner_compute_scatter", False
         ),
+        "fsdp_owner_compute_scatter_general_layout": getattr(
+            config, "muon_fsdp_owner_compute_scatter_general_layout", False
+        ),
         "fsdp_owner_compute_scatter_single_batch": getattr(
             config, "muon_fsdp_owner_compute_scatter_single_batch", False
         ),
