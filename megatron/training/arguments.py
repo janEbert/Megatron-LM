@@ -2468,6 +2468,14 @@ def _add_regularization_args(parser):
                        'chunk scatters are queued. This preserves update math and '
                        'overlaps scatter for one chunk with compute for the next. '
                        'Defaults to false.')
+    group.add_argument('--muon-fsdp-owner-compute-scatter-stream-wait',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='For exact async owner-compute/scatter updates, make the '
+                       'current CUDA stream wait on the specific all-to-all Work '
+                       'handle instead of host-blocking and waiting on the whole owner '
+                       'stream. This preserves update math and can let owner full-NS '
+                       'for one chunk overlap later owner gathers. Defaults to false.')
     group.add_argument('--muon-fsdp-boundary-batch-sort-by-size',
                        action=argparse.BooleanOptionalAction,
                        default=False,

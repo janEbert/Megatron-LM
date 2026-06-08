@@ -442,6 +442,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_owner_compute_scatter_single_batch: bool = False,
         fsdp_owner_compute_scatter_async_gather: bool = False,
         fsdp_owner_compute_scatter_async_scatter: bool = False,
+        fsdp_owner_compute_scatter_stream_wait: bool = False,
         fsdp_boundary_batch_sort_by_size: bool = False,
         fsdp_fast_reconstruct: bool = True,
         fsdp_boundary_gather_dtype: str = "fp32",
@@ -514,6 +515,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.fsdp_owner_compute_scatter_single_batch = fsdp_owner_compute_scatter_single_batch
         self.fsdp_owner_compute_scatter_async_gather = fsdp_owner_compute_scatter_async_gather
         self.fsdp_owner_compute_scatter_async_scatter = fsdp_owner_compute_scatter_async_scatter
+        self.fsdp_owner_compute_scatter_stream_wait = fsdp_owner_compute_scatter_stream_wait
         self.fsdp_boundary_batch_sort_by_size = fsdp_boundary_batch_sort_by_size
         self.fsdp_fast_reconstruct = fsdp_fast_reconstruct
         supported_boundary_gather_dtypes = ("fp32", "bf16", "int8", "fp8_e4m3fn", "fp8_e5m2")
@@ -1204,6 +1206,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"{self.fsdp_owner_compute_scatter_async_gather}, "
             "owner_compute_scatter_async_scatter="
             f"{self.fsdp_owner_compute_scatter_async_scatter}, "
+            "owner_compute_scatter_stream_wait="
+            f"{self.fsdp_owner_compute_scatter_stream_wait}, "
             f"distributed_ns_enabled={self.fsdp_distributed_ns}, "
             f"partial_distributed_ns_enabled={self.fsdp_partial_distributed_ns}, "
             f"distributed_ns_single_all_reduce={self.fsdp_distributed_ns_single_all_reduce}, "
@@ -2462,10 +2466,22 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
     def _wait_owner_compute_scatter_gather(self, state: dict[str, Any]) -> None:
         work = state.get("gather_work")
+        used_work_stream_wait = False
         if work is not None:
-            work.wait()
+            if self.fsdp_owner_compute_scatter_stream_wait and state["device"].type == "cuda":
+                block_current_stream = getattr(work, "block_current_stream", None)
+                if block_current_stream is not None:
+                    with torch.autograd.profiler.record_function(
+                        "Muon-FSDP owner gather work stream wait"
+                    ):
+                        block_current_stream()
+                    used_work_stream_wait = True
+                else:
+                    work.wait()
+            else:
+                work.wait()
         gather_stream = state.get("gather_stream")
-        if gather_stream is not None:
+        if gather_stream is not None and not used_work_stream_wait:
             device = state["device"]
             with torch.cuda.device(device):
                 torch.cuda.current_stream(device).wait_stream(gather_stream)
@@ -2616,10 +2632,22 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
     def _wait_owner_compute_scatter_scatter(self, state: dict[str, Any]) -> None:
         work = state.get("scatter_work")
+        used_work_stream_wait = False
         if work is not None:
-            work.wait()
+            if self.fsdp_owner_compute_scatter_stream_wait and state["device"].type == "cuda":
+                block_current_stream = getattr(work, "block_current_stream", None)
+                if block_current_stream is not None:
+                    with torch.autograd.profiler.record_function(
+                        "Muon-FSDP owner scatter work stream wait"
+                    ):
+                        block_current_stream()
+                    used_work_stream_wait = True
+                else:
+                    work.wait()
+            else:
+                work.wait()
         scatter_stream = state.get("scatter_stream")
-        if scatter_stream is not None:
+        if scatter_stream is not None and not used_work_stream_wait:
             device = state["device"]
             with torch.cuda.device(device):
                 torch.cuda.current_stream(device).wait_stream(scatter_stream)
