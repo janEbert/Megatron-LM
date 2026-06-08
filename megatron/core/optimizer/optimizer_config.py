@@ -475,6 +475,12 @@ class OptimizerConfig:
     drain. This preserves exact Muon math and only changes scheduling.
     """
 
+    muon_fsdp_async_partial_distributed_gather_early: bool = False
+    """If True with async partial-distributed gather, launch the partial gathers
+    immediately after pre-NS construction, before owner gather setup. This preserves
+    exact Muon math and only changes independent communication ordering.
+    """
+
     muon_fsdp_prioritize_distributed_ns: bool = False
     """If True, enqueue exact distributed Newton-Schulz batches before local Muon
     batches. This preserves update math and only changes scheduling across
