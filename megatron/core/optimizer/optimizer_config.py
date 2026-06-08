@@ -390,6 +390,13 @@ class OptimizerConfig:
     owner chunk i wait for later owner chunks already queued on the same stream.
     """
 
+    muon_fsdp_owner_compute_scatter_overlap_partial_ns: bool = False
+    """If True, after async owner full-NS compute, launch owner scatter all-to-alls
+    and defer waiting/applying returned owner shards until after async partial
+    distributed NS/update. This preserves per-parameter update math while trying
+    to overlap owner scatter communication with the partial-distributed NS tail.
+    """
+
     muon_fsdp_boundary_batch_sort_by_size: bool = False
     """If True, deterministically launch larger Muon+M-FSDP boundary gather batches first within
     each identical communicator/stage group. This preserves per-communicator collective order and
