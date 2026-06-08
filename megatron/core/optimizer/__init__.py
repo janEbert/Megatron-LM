@@ -820,6 +820,9 @@ def _get_muon_fsdp_kwargs(config: OptimizerConfig) -> dict[str, Any]:
         "fsdp_async_partial_distributed_gather": getattr(
             config, "muon_fsdp_async_partial_distributed_gather", False
         ),
+        "fsdp_async_partial_distributed_gather_early": getattr(
+            config, "muon_fsdp_async_partial_distributed_gather_early", False
+        ),
         "fsdp_prioritize_distributed_ns": getattr(
             config, "muon_fsdp_prioritize_distributed_ns", False
         ),

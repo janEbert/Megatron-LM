@@ -463,6 +463,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_defer_distributed_ns_under_gather: bool = False,
         fsdp_defer_partial_distributed_ns_under_gather: bool = False,
         fsdp_async_partial_distributed_gather: bool = False,
+        fsdp_async_partial_distributed_gather_early: bool = False,
         fsdp_prioritize_distributed_ns: bool = False,
         fsdp_approx_distributed_ns_update: bool = False,
         fsdp_approx_local_boundary_update: bool = False,
@@ -550,6 +551,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             fsdp_defer_partial_distributed_ns_under_gather
         )
         self.fsdp_async_partial_distributed_gather = fsdp_async_partial_distributed_gather
+        self.fsdp_async_partial_distributed_gather_early = (
+            fsdp_async_partial_distributed_gather_early
+        )
         self.fsdp_prioritize_distributed_ns = fsdp_prioritize_distributed_ns
         self.fsdp_approx_distributed_ns_update = fsdp_approx_distributed_ns_update
         self.fsdp_approx_local_boundary_update = fsdp_approx_local_boundary_update
@@ -1229,6 +1233,10 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"defer_distributed_ns_under_gather={self.fsdp_defer_distributed_ns_under_gather}, "
             "defer_partial_distributed_ns_under_gather="
             f"{self.fsdp_defer_partial_distributed_ns_under_gather}, "
+            "async_partial_distributed_gather="
+            f"{self.fsdp_async_partial_distributed_gather}, "
+            "async_partial_distributed_gather_early="
+            f"{self.fsdp_async_partial_distributed_gather_early}, "
             f"prioritize_distributed_ns={self.fsdp_prioritize_distributed_ns}, "
             f"approx_distributed_ns_update={self.fsdp_approx_distributed_ns_update}, "
             f"approx_local_boundary_update={self.fsdp_approx_local_boundary_update}, "
@@ -1746,6 +1754,27 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
         self._maybe_log_fsdp_update_mode_summary(all_updates)
 
+        early_async_partial_pending_chunks: list[dict[str, Any]] | None = None
+        early_async_partial_fallback_updates: list[tuple[int, tuple]] | None = None
+        if (
+            overlap_enabled
+            and self.fsdp_async_partial_distributed_gather
+            and self.fsdp_async_partial_distributed_gather_early
+            and self.fsdp_defer_partial_distributed_ns_under_gather
+        ):
+            early_partial_updates = [
+                (idx, update)
+                for idx, update in enumerate(all_updates)
+                if update[2] == "partial_distributed"
+            ]
+            if early_partial_updates:
+                with torch.autograd.profiler.record_function(
+                    "Muon-FSDP phase 2p early start async partial distributed gather"
+                ):
+                    (early_async_partial_pending_chunks, early_async_partial_fallback_updates) = (
+                        self._start_async_partial_distributed_gathers(early_partial_updates)
+                    )
+
         async_owner_gather_state = None
         if overlap_enabled and self.fsdp_owner_compute_scatter_async_gather:
             owner_updates = [update for update in all_updates if update[2] == "owner"]
@@ -1784,6 +1813,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         early_gather_state,
                         early_applied_update_indices,
                         async_owner_gather_state,
+                        early_async_partial_pending_chunks,
+                        early_async_partial_fallback_updates,
                     )
                 else:
                     if boundary_update_indices:
@@ -4433,6 +4464,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         gather_state: dict[str, Any] | None = None,
         applied_update_indices: set[int] | None = None,
         pending_owner_states: list[dict[str, Any]] | None = None,
+        async_partial_pending_chunks: list[dict[str, Any]] | None = None,
+        async_partial_fallback_updates: list[tuple[int, tuple]] | None = None,
     ) -> None:
         if gather_state is None:
             gather_state = self._start_overlap_boundary_gathers(
@@ -4509,15 +4542,29 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         next_scratch_slot = self.fsdp_overlap_boundary_prefetch_batches
         reusable_scratch_slots: list[int] = []
 
-        async_partial_pending_chunks: list[dict[str, Any]] = []
-        if deferred_partial_updates:
-            with torch.autograd.profiler.record_function(
-                "Muon-FSDP phase 2p start async partial distributed gather"
-            ):
-                async_partial_pending_chunks, fallback_partial_updates = (
-                    self._start_async_partial_distributed_gathers(deferred_partial_updates)
+        if async_partial_pending_chunks is None:
+            async_partial_pending_chunks = []
+            if deferred_partial_updates:
+                with torch.autograd.profiler.record_function(
+                    "Muon-FSDP phase 2p start async partial distributed gather"
+                ):
+                    async_partial_pending_chunks, fallback_partial_updates = (
+                        self._start_async_partial_distributed_gathers(deferred_partial_updates)
+                    )
+                deferred_distributed_updates.extend(fallback_partial_updates)
+        else:
+            deferred_distributed_updates.extend(async_partial_fallback_updates or [])
+            if deferred_partial_updates:
+                pending_count = sum(
+                    len(pending_chunk["chunk"]) for pending_chunk in async_partial_pending_chunks
                 )
-            deferred_distributed_updates.extend(fallback_partial_updates)
+                fallback_count = len(async_partial_fallback_updates or [])
+                if pending_count + fallback_count != len(deferred_partial_updates):
+                    raise AssertionError(
+                        "Early async partial-distributed gather state/update mismatch: "
+                        f"pending={pending_count}, fallback={fallback_count}, "
+                        f"deferred={len(deferred_partial_updates)}."
+                    )
         pending_owner_scatter_states: list[dict[str, Any]] | None = None
 
         def start_next_pending(slot: int) -> bool:
