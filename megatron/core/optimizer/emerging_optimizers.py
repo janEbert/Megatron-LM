@@ -1751,7 +1751,18 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
         with utils.fp32_matmul_precision(self.fp32_matmul_prec):
             with torch.autograd.profiler.record_function("Muon-FSDP phase 3 NS/update"):
-                if overlap_enabled and boundary_update_indices:
+                has_async_partial_distributed_updates = (
+                    overlap_enabled
+                    and self.fsdp_defer_partial_distributed_ns_under_gather
+                    and self.fsdp_async_partial_distributed_gather
+                    and any(update[2] == "partial_distributed" for update in all_updates)
+                )
+                use_overlap_update_engine = overlap_enabled and (
+                    bool(boundary_update_indices)
+                    or bool(async_owner_gather_state)
+                    or has_async_partial_distributed_updates
+                )
+                if use_overlap_update_engine:
                     self._overlap_boundary_gather_and_update(
                         all_updates,
                         boundary_update_indices,
