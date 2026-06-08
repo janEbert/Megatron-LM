@@ -383,6 +383,13 @@ class OptimizerConfig:
     chunk i + 1.
     """
 
+    muon_fsdp_owner_compute_scatter_stream_wait: bool = False
+    """If True, wait for async owner-compute/scatter all-to-all work with
+    torch.distributed.Work.block_current_stream() instead of host work.wait()
+    plus a broad owner-stream wait. This preserves update math and avoids making
+    owner chunk i wait for later owner chunks already queued on the same stream.
+    """
+
     muon_fsdp_boundary_batch_sort_by_size: bool = False
     """If True, deterministically launch larger Muon+M-FSDP boundary gather batches first within
     each identical communicator/stage group. This preserves per-communicator collective order and
