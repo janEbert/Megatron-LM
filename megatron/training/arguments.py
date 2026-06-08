@@ -2569,6 +2569,14 @@ def _add_regularization_args(parser):
                        'finish only the Newton-Schulz/update after the boundary drain. '
                        'This preserves exact Muon math and changes only scheduling. '
                        'Defaults to false.')
+    group.add_argument('--muon-fsdp-async-partial-distributed-gather-early',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='With async partial-distributed gather enabled, launch '
+                       'partial gathers immediately after pre-NS construction and '
+                       'before owner gather setup. This preserves exact Muon math '
+                       'and changes only independent communication ordering. '
+                       'Defaults to false.')
     group.add_argument('--muon-fsdp-prioritize-distributed-ns',
                        action=argparse.BooleanOptionalAction,
                        default=False,
