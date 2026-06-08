@@ -2437,6 +2437,13 @@ def _add_regularization_args(parser):
                        'pre-Newton-Schulz shards to deterministic owner ranks, compute '
                        'the same full-matrix Newton-Schulz update once on the owner, '
                        'and scatter exact local update slices back. Defaults to false.')
+    group.add_argument('--muon-fsdp-owner-compute-scatter-general-layout',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='Allow exact owner-compute/scatter for general rectangular '
+                       'FSDP shard layouts, including TP-column-sharded boundary tensors. '
+                       'Owners reconstruct from chunk metadata instead of requiring a '
+                       'contiguous row-sharded flat layout. Defaults to false.')
     group.add_argument('--muon-fsdp-owner-compute-scatter-single-batch',
                        action=argparse.BooleanOptionalAction,
                        default=False,

@@ -438,6 +438,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_boundary_pre_ns_pack_stream: bool = False,
         fsdp_boundary_gather_direct_batched_ns: bool = False,
         fsdp_boundary_owner_compute_scatter: bool = False,
+        fsdp_owner_compute_scatter_general_layout: bool = False,
         fsdp_owner_compute_scatter_single_batch: bool = False,
         fsdp_owner_compute_scatter_async_gather: bool = False,
         fsdp_owner_compute_scatter_async_scatter: bool = False,
@@ -509,6 +510,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.fsdp_boundary_pre_ns_pack_stream = fsdp_boundary_pre_ns_pack_stream
         self.fsdp_boundary_gather_direct_batched_ns = fsdp_boundary_gather_direct_batched_ns
         self.fsdp_boundary_owner_compute_scatter = fsdp_boundary_owner_compute_scatter
+        self.fsdp_owner_compute_scatter_general_layout = fsdp_owner_compute_scatter_general_layout
         self.fsdp_owner_compute_scatter_single_batch = fsdp_owner_compute_scatter_single_batch
         self.fsdp_owner_compute_scatter_async_gather = fsdp_owner_compute_scatter_async_gather
         self.fsdp_owner_compute_scatter_async_scatter = fsdp_owner_compute_scatter_async_scatter
@@ -1194,6 +1196,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"{named_qkv_counts.get('partial_distributed', 0)}, "
             "boundary_owner_compute_scatter="
             f"{self.fsdp_boundary_owner_compute_scatter}, "
+            "owner_compute_scatter_general_layout="
+            f"{self.fsdp_owner_compute_scatter_general_layout}, "
             "owner_compute_scatter_single_batch="
             f"{self.fsdp_owner_compute_scatter_single_batch}, "
             "owner_compute_scatter_async_gather="
@@ -5203,13 +5207,18 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         return plan
 
     def _get_flat_uneven_gather_plan(
-        self, dtensor_ref, plan: dict[str, Any], *, require_flat_enabled: bool = True
+        self,
+        dtensor_ref,
+        plan: dict[str, Any],
+        *,
+        require_flat_enabled: bool = True,
+        allow_general_layout: bool = False,
     ) -> dict[str, Any] | None:
         if require_flat_enabled and not self.fsdp_flat_batched_all_gather:
             return None
         if len(plan["stages"]) <= 1:
             return None
-        if not plan["is_contiguous_full_order"]:
+        if not allow_general_layout and not plan["is_contiguous_full_order"]:
             return None
 
         shard_placement_types = (Shard, _StridedShard)
@@ -5217,7 +5226,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             placement = dtensor_ref.placements[mesh_dim]
             if not isinstance(placement, shard_placement_types):
                 return None
-            if getattr(placement, "dim", None) != 0:
+            if not allow_general_layout and getattr(placement, "dim", None) != 0:
                 return None
 
         flat_group = self._get_existing_flat_uneven_gather_group(dtensor_ref, plan)
@@ -5263,8 +5272,13 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         ]
         flat_rank_numels = [chunk_info["numel"] for chunk_info in flat_chunk_infos]
         assigned_numel = sum(flat_rank_numels)
+        nonzero_flat_chunk_infos = [
+            chunk_info for chunk_info in flat_chunk_infos if chunk_info["numel"] > 0
+        ]
         try:
-            _assert_chunks_cover_full_tensor(dtensor_ref.shape, flat_chunk_infos, assigned_numel)
+            _assert_chunks_cover_full_tensor(
+                dtensor_ref.shape, nonzero_flat_chunk_infos, assigned_numel
+            )
         except AssertionError:
             self._flat_uneven_gather_plan_cache[cache_key] = None
             return None
@@ -5272,6 +5286,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         full_shape = torch.Size(dtensor_ref.shape)
 
         def _chunk_flat_start(chunk_info: dict[str, Any]) -> int:
+            if chunk_info["numel"] == 0:
+                return 0
             flat_start = 0
             stride = 1
             for dim in range(len(full_shape) - 1, -1, -1):
@@ -5564,10 +5580,18 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         plan = self._get_uneven_gather_plan(dtensor_ref)
         if plan is None:
             return None
-        flat_plan = self._get_flat_uneven_gather_plan(dtensor_ref, plan, require_flat_enabled=False)
+        flat_plan = self._get_flat_uneven_gather_plan(
+            dtensor_ref,
+            plan,
+            require_flat_enabled=False,
+            allow_general_layout=self.fsdp_owner_compute_scatter_general_layout,
+        )
         if flat_plan is None:
             return None
-        if not flat_plan["flat_sorted_is_contiguous_full_order"]:
+        if (
+            not self.fsdp_owner_compute_scatter_general_layout
+            and not flat_plan["flat_sorted_is_contiguous_full_order"]
+        ):
             return None
         return flat_plan
 
