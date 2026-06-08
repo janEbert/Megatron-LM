@@ -448,6 +448,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_owner_compute_scatter_async_gather: bool = False,
         fsdp_owner_compute_scatter_async_scatter: bool = False,
         fsdp_owner_compute_scatter_stream_wait: bool = False,
+        fsdp_owner_compute_scatter_overlap_partial_ns: bool = False,
         fsdp_boundary_batch_sort_by_size: bool = False,
         fsdp_fast_reconstruct: bool = True,
         fsdp_boundary_gather_dtype: str = "fp32",
@@ -521,6 +522,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.fsdp_owner_compute_scatter_async_gather = fsdp_owner_compute_scatter_async_gather
         self.fsdp_owner_compute_scatter_async_scatter = fsdp_owner_compute_scatter_async_scatter
         self.fsdp_owner_compute_scatter_stream_wait = fsdp_owner_compute_scatter_stream_wait
+        self.fsdp_owner_compute_scatter_overlap_partial_ns = (
+            fsdp_owner_compute_scatter_overlap_partial_ns
+        )
         self.fsdp_boundary_batch_sort_by_size = fsdp_boundary_batch_sort_by_size
         self.fsdp_fast_reconstruct = fsdp_fast_reconstruct
         supported_boundary_gather_dtypes = ("fp32", "bf16", "int8", "fp8_e4m3fn", "fp8_e5m2")
@@ -1213,6 +1217,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"{self.fsdp_owner_compute_scatter_async_scatter}, "
             "owner_compute_scatter_stream_wait="
             f"{self.fsdp_owner_compute_scatter_stream_wait}, "
+            "owner_compute_scatter_overlap_partial_ns="
+            f"{self.fsdp_owner_compute_scatter_overlap_partial_ns}, "
             f"distributed_ns_enabled={self.fsdp_distributed_ns}, "
             f"partial_distributed_ns_enabled={self.fsdp_partial_distributed_ns}, "
             f"distributed_ns_single_all_reduce={self.fsdp_distributed_ns_single_all_reduce}, "
@@ -2755,21 +2761,10 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self, pending_owner_states: list[dict[str, Any]]
     ) -> None:
         if self.fsdp_owner_compute_scatter_async_scatter:
-            launched_scatter_states = []
-            for state in pending_owner_states:
-                with torch.autograd.profiler.record_function(
-                    "Muon-FSDP owner async gather finish/compute/start scatter "
-                    f"count={len(state['chunk'])} ordinal_offset={state['item_ordinal_offset']}"
-                ):
-                    self._prepare_owner_compute_scatter_scatter(state)
-                    self._start_owner_compute_scatter_scatter(state, async_op=True)
-                launched_scatter_states.append(state)
-            for state in launched_scatter_states:
-                with torch.autograd.profiler.record_function(
-                    "Muon-FSDP owner async scatter finish/apply "
-                    f"count={len(state['chunk'])} ordinal_offset={state['item_ordinal_offset']}"
-                ):
-                    self._apply_owner_compute_scatter_received_updates(state)
+            launched_scatter_states = self._start_async_owner_compute_scatter_scatters(
+                pending_owner_states
+            )
+            self._finish_async_owner_compute_scatter_scatters(launched_scatter_states)
             return
 
         for state in pending_owner_states:
@@ -2778,6 +2773,30 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 f"count={len(state['chunk'])} ordinal_offset={state['item_ordinal_offset']}"
             ):
                 self._finish_owner_compute_scatter_muon_updates(state)
+
+    def _start_async_owner_compute_scatter_scatters(
+        self, pending_owner_states: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        launched_scatter_states = []
+        for state in pending_owner_states:
+            with torch.autograd.profiler.record_function(
+                "Muon-FSDP owner async gather finish/compute/start scatter "
+                f"count={len(state['chunk'])} ordinal_offset={state['item_ordinal_offset']}"
+            ):
+                self._prepare_owner_compute_scatter_scatter(state)
+                self._start_owner_compute_scatter_scatter(state, async_op=True)
+            launched_scatter_states.append(state)
+        return launched_scatter_states
+
+    def _finish_async_owner_compute_scatter_scatters(
+        self, launched_scatter_states: list[dict[str, Any]]
+    ) -> None:
+        for state in launched_scatter_states:
+            with torch.autograd.profiler.record_function(
+                "Muon-FSDP owner async scatter finish/apply "
+                f"count={len(state['chunk'])} ordinal_offset={state['item_ordinal_offset']}"
+            ):
+                self._apply_owner_compute_scatter_received_updates(state)
 
     def _fsdp_batched_distributed_ns_key(
         self, p: torch.Tensor, pre_ns_grad: torch.Tensor | None, update_mode: str
@@ -4499,6 +4518,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                     self._start_async_partial_distributed_gathers(deferred_partial_updates)
                 )
             deferred_distributed_updates.extend(fallback_partial_updates)
+        pending_owner_scatter_states: list[dict[str, Any]] | None = None
 
         def start_next_pending(slot: int) -> bool:
             next_batch = next(batch_iter, None)
@@ -4807,7 +4827,18 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                             "Async owner-compute/scatter state/update mismatch: "
                             f"pending={pending_updates}, deferred={len(deferred_owner_updates)}."
                         )
-                    self._finish_async_owner_compute_scatter_gathers(pending_owner_states)
+                    overlap_owner_scatter_partial_ns = (
+                        self.fsdp_owner_compute_scatter_overlap_partial_ns
+                        and self.fsdp_owner_compute_scatter_async_scatter
+                        and bool(async_partial_pending_chunks)
+                        and self._fsdp_weight_update_hooks_are_noop
+                    )
+                    if overlap_owner_scatter_partial_ns:
+                        pending_owner_scatter_states = (
+                            self._start_async_owner_compute_scatter_scatters(pending_owner_states)
+                        )
+                    else:
+                        self._finish_async_owner_compute_scatter_gathers(pending_owner_states)
                 else:
                     self._apply_precomputed_muon_updates(
                         [update for _, update in deferred_owner_updates]
@@ -4830,6 +4861,12 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 "Muon-FSDP phase 3e async partial distributed NS/update"
             ):
                 self._finish_async_partial_distributed_gathers(async_partial_pending_chunks)
+
+        if pending_owner_scatter_states is not None:
+            with torch.autograd.profiler.record_function(
+                "Muon-FSDP phase 3f owner scatter finish/apply after partial NS"
+            ):
+                self._finish_async_owner_compute_scatter_scatters(pending_owner_scatter_states)
 
     def _local_update_work_estimate(self, p: torch.Tensor, pre_ns_grad: torch.Tensor | None) -> int:
         if pre_ns_grad is not None:

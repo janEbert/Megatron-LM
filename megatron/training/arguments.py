@@ -2498,6 +2498,16 @@ def _add_regularization_args(parser):
                        'handle instead of host-blocking and waiting on the whole owner '
                        'stream. This preserves update math and can let owner full-NS '
                        'for one chunk overlap later owner gathers. Defaults to false.')
+    group.add_argument('--muon-fsdp-owner-compute-scatter-overlap-partial-ns',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='For exact async owner-compute/scatter updates, launch '
+                       'owner shard-return all-to-alls after owner full-NS compute, '
+                       'then run async partial-distributed NS/update before waiting '
+                       'for and applying returned owner shards. This preserves '
+                       'per-parameter update math and tries to overlap owner scatter '
+                       'communication with the partial-distributed NS tail. Defaults '
+                       'to false.')
     group.add_argument('--muon-fsdp-boundary-batch-sort-by-size',
                        action=argparse.BooleanOptionalAction,
                        default=False,
