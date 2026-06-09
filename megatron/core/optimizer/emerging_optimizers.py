@@ -445,6 +445,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_owner_compute_scatter_stream_wait: bool = False,
         fsdp_owner_compute_scatter_overlap_partial_ns: bool = False,
         fsdp_owner_compute_scatter_balance_by_size: bool = False,
+        fsdp_owner_compute_scatter_flat_scatter_copy: bool = False,
         fsdp_boundary_batch_sort_by_size: bool = False,
         fsdp_fast_reconstruct: bool = True,
         fsdp_boundary_gather_dtype: str = "fp32",
@@ -523,6 +524,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             fsdp_owner_compute_scatter_overlap_partial_ns
         )
         self.fsdp_owner_compute_scatter_balance_by_size = fsdp_owner_compute_scatter_balance_by_size
+        self.fsdp_owner_compute_scatter_flat_scatter_copy = (
+            fsdp_owner_compute_scatter_flat_scatter_copy
+        )
         self.fsdp_boundary_batch_sort_by_size = fsdp_boundary_batch_sort_by_size
         self.fsdp_fast_reconstruct = fsdp_fast_reconstruct
         supported_boundary_gather_dtypes = ("fp32", "bf16", "int8", "fp8_e4m3fn", "fp8_e5m2")
@@ -1222,6 +1226,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"{self.fsdp_owner_compute_scatter_overlap_partial_ns}, "
             "owner_compute_scatter_balance_by_size="
             f"{self.fsdp_owner_compute_scatter_balance_by_size}, "
+            "owner_compute_scatter_flat_scatter_copy="
+            f"{self.fsdp_owner_compute_scatter_flat_scatter_copy}, "
             f"distributed_ns_enabled={self.fsdp_distributed_ns}, "
             f"partial_distributed_ns_enabled={self.fsdp_partial_distributed_ns}, "
             f"distributed_ns_single_all_reduce={self.fsdp_distributed_ns_single_all_reduce}, "
@@ -2396,6 +2402,45 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         slices = tuple(slice(o, o + s) for o, s in zip(chunk_info["offset"], chunk_shape))
         return full_update[slices].contiguous().view(-1)
 
+    def _try_copy_flat_ordered_full_update_to_scatter_send(
+        self,
+        full_update: torch.Tensor,
+        flat_plan: dict[str, Any],
+        scatter_send: torch.Tensor,
+        scatter_send_cursors: list[int],
+        param_dtype: torch.dtype,
+    ) -> bool:
+        if not (
+            self.fsdp_owner_compute_scatter_flat_scatter_copy
+            and self.fsdp_fast_reconstruct
+            and flat_plan["flat_sorted_is_contiguous_full_order"]
+        ):
+            return False
+
+        with torch.autograd.profiler.record_function("Muon-FSDP owner flat-order scatter copy"):
+            full_flat = full_update.contiguous().view(-1)
+            expected_numel = full_flat.numel()
+            source_cursor = 0
+            for rank in flat_plan["flat_sorted_rank_indices"]:
+                rank_numel = flat_plan["flat_rank_numels"][rank]
+                if rank_numel == 0:
+                    continue
+                source = full_flat[source_cursor : source_cursor + rank_numel]
+                if source.dtype != param_dtype:
+                    source = source.to(dtype=param_dtype)
+                offset = scatter_send_cursors[rank]
+                scatter_send[offset : offset + rank_numel].copy_(source)
+                scatter_send_cursors[rank] += rank_numel
+                source_cursor += rank_numel
+
+            if source_cursor != expected_numel:
+                raise AssertionError(
+                    "Flat-order owner scatter copy did not cover the full update: "
+                    f"copied={source_cursor}, expected={expected_numel}."
+                )
+
+        return True
+
     def _prepare_owner_compute_scatter_state(
         self,
         chunk: list,
@@ -2645,6 +2690,10 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 full_update = super(FSDPTensorParallelMuon, self).orthogonalize(
                     p, full_pre_ns, **group_kwargs
                 )
+                if self._try_copy_flat_ordered_full_update_to_scatter_send(
+                    full_update, flat_plan, scatter_send, scatter_send_cursors, param_dtype
+                ):
+                    continue
                 for rank, rank_numel in enumerate(flat_plan["flat_rank_numels"]):
                     if rank_numel == 0:
                         continue

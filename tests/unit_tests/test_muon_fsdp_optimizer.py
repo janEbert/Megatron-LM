@@ -2068,6 +2068,7 @@ class TestFSDPFactoryIntegration:
         assert not config.muon_fsdp_owner_compute_scatter_stream_wait
         assert not config.muon_fsdp_owner_compute_scatter_overlap_partial_ns
         assert not config.muon_fsdp_owner_compute_scatter_balance_by_size
+        assert not config.muon_fsdp_owner_compute_scatter_flat_scatter_copy
         assert not config.muon_fsdp_async_partial_distributed_gather_early
         assert not config.muon_fsdp_overlap_comm_compute
 
@@ -2131,6 +2132,7 @@ class TestFSDPFactoryIntegration:
             muon_fsdp_owner_compute_scatter_stream_wait=True,
             muon_fsdp_owner_compute_scatter_overlap_partial_ns=True,
             muon_fsdp_owner_compute_scatter_balance_by_size=True,
+            muon_fsdp_owner_compute_scatter_flat_scatter_copy=True,
             muon_fsdp_async_partial_distributed_gather_early=True,
             muon_fsdp_overlap_comm_compute=True,
         )
@@ -2190,5 +2192,6 @@ class TestFSDPFactoryIntegration:
             assert base_opt.fsdp_owner_compute_scatter_stream_wait
             assert base_opt.fsdp_owner_compute_scatter_overlap_partial_ns
             assert base_opt.fsdp_owner_compute_scatter_balance_by_size
+            assert base_opt.fsdp_owner_compute_scatter_flat_scatter_copy
             assert base_opt.fsdp_async_partial_distributed_gather_early
             assert base_opt.fsdp_overlap_comm_compute
