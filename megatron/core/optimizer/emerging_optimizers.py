@@ -449,6 +449,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         fsdp_owner_compute_scatter_async_scatter: bool = False,
         fsdp_owner_compute_scatter_stream_wait: bool = False,
         fsdp_owner_compute_scatter_overlap_partial_ns: bool = False,
+        fsdp_owner_compute_scatter_balance_by_size: bool = False,
         fsdp_boundary_batch_sort_by_size: bool = False,
         fsdp_fast_reconstruct: bool = True,
         fsdp_boundary_gather_dtype: str = "fp32",
@@ -526,6 +527,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         self.fsdp_owner_compute_scatter_overlap_partial_ns = (
             fsdp_owner_compute_scatter_overlap_partial_ns
         )
+        self.fsdp_owner_compute_scatter_balance_by_size = fsdp_owner_compute_scatter_balance_by_size
         self.fsdp_boundary_batch_sort_by_size = fsdp_boundary_batch_sort_by_size
         self.fsdp_fast_reconstruct = fsdp_fast_reconstruct
         supported_boundary_gather_dtypes = ("fp32", "bf16", "int8", "fp8_e4m3fn", "fp8_e5m2")
@@ -1223,6 +1225,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             f"{self.fsdp_owner_compute_scatter_stream_wait}, "
             "owner_compute_scatter_overlap_partial_ns="
             f"{self.fsdp_owner_compute_scatter_overlap_partial_ns}, "
+            "owner_compute_scatter_balance_by_size="
+            f"{self.fsdp_owner_compute_scatter_balance_by_size}, "
             f"distributed_ns_enabled={self.fsdp_distributed_ns}, "
             f"partial_distributed_ns_enabled={self.fsdp_partial_distributed_ns}, "
             f"distributed_ns_single_all_reduce={self.fsdp_distributed_ns_single_all_reduce}, "
@@ -2334,6 +2338,58 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return flat_plan["flat_group_rank"]
         return active_ranks[item_ordinal % len(active_ranks)]
 
+    def _owner_compute_scatter_item_work(self, p: torch.Tensor, flat_plan: dict[str, Any]) -> int:
+        full_numel = sum(int(numel) for numel in flat_plan["flat_rank_numels"])
+        shape = tuple(int(dim) for dim in p.shape)
+        if len(shape) < 2:
+            return full_numel
+        rows = shape[-2]
+        cols = shape[-1]
+        short_dim = min(rows, cols)
+        long_dim = max(rows, cols)
+        return long_dim * short_dim * short_dim + full_numel
+
+    def _owner_ranks_for_boundary_chunk(
+        self, chunk: list, flat_plans: list[dict[str, Any]], *, item_ordinal_offset: int = 0
+    ) -> list[int]:
+        if not self.fsdp_owner_compute_scatter_balance_by_size:
+            return [
+                self._owner_rank_for_boundary_item(flat_plan, item_ordinal_offset + item_ordinal)
+                for item_ordinal, flat_plan in enumerate(flat_plans)
+            ]
+
+        group_size = flat_plans[0]["flat_group_size"]
+        owners = [flat_plans[0]["flat_group_rank"]] * len(flat_plans)
+        owner_loads = [0] * group_size
+        owner_counts = [0] * group_size
+        eligible_items = []
+        for item_ordinal, (update, flat_plan) in enumerate(zip(chunk, flat_plans)):
+            p = update[0]
+            active_ranks = flat_plan["flat_active_rank_indices"]
+            if not active_ranks:
+                owners[item_ordinal] = flat_plan["flat_group_rank"]
+                continue
+            eligible_items.append(
+                (
+                    self._owner_compute_scatter_item_work(p, flat_plan),
+                    item_ordinal_offset + item_ordinal,
+                    item_ordinal,
+                    active_ranks,
+                )
+            )
+
+        for item_work, _, item_ordinal, active_ranks in sorted(
+            eligible_items, key=lambda item: (-item[0], item[1])
+        ):
+            owner = min(
+                active_ranks, key=lambda rank: (owner_loads[rank], owner_counts[rank], rank)
+            )
+            owners[item_ordinal] = owner
+            owner_loads[owner] += item_work
+            owner_counts[owner] += 1
+
+        return owners
+
     def _flat_rank_shard_from_full_update(
         self, full_update: torch.Tensor, flat_plan: dict[str, Any], rank: int
     ) -> torch.Tensor:
@@ -2369,7 +2425,6 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
 
         flat_plans = []
         wire_buffers = []
-        owners = []
         for item_ordinal, update in enumerate(chunk):
             p, pre_ns_grad, update_mode, _, _ = update
             if update_mode != "owner" or pre_ns_grad is None:
@@ -2395,9 +2450,9 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                     self._prepare_boundary_gather_tensor(pre_ns_grad)
                 )
             )
-            owners.append(
-                self._owner_rank_for_boundary_item(flat_plan, item_ordinal_offset + item_ordinal)
-            )
+        owners = self._owner_ranks_for_boundary_chunk(
+            chunk, flat_plans, item_ordinal_offset=item_ordinal_offset
+        )
 
         gather_send_counts = [0] * group_size
         for flat_plan, owner in zip(flat_plans, owners):

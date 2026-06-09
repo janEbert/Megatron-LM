@@ -397,6 +397,12 @@ class OptimizerConfig:
     to overlap owner scatter communication with the partial-distributed NS tail.
     """
 
+    muon_fsdp_owner_compute_scatter_balance_by_size: bool = False
+    """If True, exact owner-compute/scatter assigns owners by deterministic estimated
+    full-matrix Newton-Schulz work instead of item ordinal. This preserves update math
+    and spreads large owner computations across ranks.
+    """
+
     muon_fsdp_boundary_batch_sort_by_size: bool = False
     """If True, deterministically launch larger Muon+M-FSDP boundary gather batches first within
     each identical communicator/stage group. This preserves per-communicator collective order and
