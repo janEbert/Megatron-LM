@@ -403,6 +403,12 @@ class OptimizerConfig:
     and spreads large owner computations across ranks.
     """
 
+    muon_fsdp_owner_compute_scatter_flat_scatter_copy: bool = False
+    """If True, exact owner-compute/scatter packs full owner updates into scatter send
+    buffers using the flat contiguous FSDP chunk order when available. This preserves
+    update math and avoids per-rank contiguous shard temporaries for eligible layouts.
+    """
+
     muon_fsdp_boundary_batch_sort_by_size: bool = False
     """If True, deterministically launch larger Muon+M-FSDP boundary gather batches first within
     each identical communicator/stage group. This preserves per-communicator collective order and
