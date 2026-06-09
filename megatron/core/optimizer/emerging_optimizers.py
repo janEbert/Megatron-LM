@@ -2421,16 +2421,13 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             full_flat = full_update.contiguous().view(-1)
             expected_numel = full_flat.numel()
             source_cursor = 0
+            contiguous_segments = []
             for rank in flat_plan["flat_sorted_rank_indices"]:
                 rank_numel = flat_plan["flat_rank_numels"][rank]
                 if rank_numel == 0:
                     continue
-                source = full_flat[source_cursor : source_cursor + rank_numel]
-                if source.dtype != param_dtype:
-                    source = source.to(dtype=param_dtype)
                 offset = scatter_send_cursors[rank]
-                scatter_send[offset : offset + rank_numel].copy_(source)
-                scatter_send_cursors[rank] += rank_numel
+                contiguous_segments.append((rank, offset, rank_numel))
                 source_cursor += rank_numel
 
             if source_cursor != expected_numel:
@@ -2438,6 +2435,33 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                     "Flat-order owner scatter copy did not cover the full update: "
                     f"copied={source_cursor}, expected={expected_numel}."
                 )
+
+            contiguous_dest = True
+            if contiguous_segments:
+                next_offset = contiguous_segments[0][1]
+                for _, offset, rank_numel in contiguous_segments:
+                    if offset != next_offset:
+                        contiguous_dest = False
+                        break
+                    next_offset += rank_numel
+            if contiguous_dest and contiguous_segments:
+                with torch.autograd.profiler.record_function(
+                    "Muon-FSDP owner flat-order scatter copy contiguous"
+                ):
+                    base_offset = contiguous_segments[0][1]
+                    scatter_send[base_offset : base_offset + expected_numel].copy_(full_flat)
+                for rank, _, rank_numel in contiguous_segments:
+                    scatter_send_cursors[rank] += rank_numel
+                return True
+
+            source_cursor = 0
+            for rank, offset, rank_numel in contiguous_segments:
+                source = full_flat[source_cursor : source_cursor + rank_numel]
+                if source.dtype != param_dtype:
+                    source = source.to(dtype=param_dtype)
+                scatter_send[offset : offset + rank_numel].copy_(source)
+                scatter_send_cursors[rank] += rank_numel
+                source_cursor += rank_numel
 
         return True
 
