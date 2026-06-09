@@ -2486,6 +2486,13 @@ def _add_regularization_args(parser):
                        'per-parameter update math and tries to overlap owner scatter '
                        'communication with the partial-distributed NS tail. Defaults '
                        'to false.')
+    group.add_argument('--muon-fsdp-owner-compute-scatter-balance-by-size',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='For exact owner-compute/scatter updates, deterministically '
+                       'assign owner ranks by estimated full-matrix Newton-Schulz work '
+                       'instead of item ordinal. This preserves update math while '
+                       'spreading large owner computations across ranks. Defaults to false.')
     group.add_argument('--muon-fsdp-boundary-batch-sort-by-size',
                        action=argparse.BooleanOptionalAction,
                        default=False,
