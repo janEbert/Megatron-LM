@@ -2515,6 +2515,14 @@ def _add_regularization_args(parser):
                        'assign owner ranks by estimated full-matrix Newton-Schulz work '
                        'instead of item ordinal. This preserves update math while '
                        'spreading large owner computations across ranks. Defaults to false.')
+    group.add_argument('--muon-fsdp-owner-compute-scatter-flat-scatter-copy',
+                       action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help='For exact owner-compute/scatter updates, pack full owner '
+                       'updates into scatter send buffers using flat contiguous FSDP '
+                       'chunk order when available. This preserves update math while '
+                       'avoiding per-rank contiguous shard temporaries for eligible '
+                       'layouts. Defaults to false.')
     group.add_argument('--muon-fsdp-boundary-batch-sort-by-size',
                        action=argparse.BooleanOptionalAction,
                        default=False,

@@ -794,6 +794,9 @@ def _get_muon_fsdp_kwargs(config: OptimizerConfig) -> dict[str, Any]:
         "fsdp_owner_compute_scatter_balance_by_size": getattr(
             config, "muon_fsdp_owner_compute_scatter_balance_by_size", False
         ),
+        "fsdp_owner_compute_scatter_flat_scatter_copy": getattr(
+            config, "muon_fsdp_owner_compute_scatter_flat_scatter_copy", False
+        ),
         "fsdp_boundary_batch_sort_by_size": getattr(
             config, "muon_fsdp_boundary_batch_sort_by_size", False
         ),
