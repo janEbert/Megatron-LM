@@ -207,6 +207,164 @@ def _make_fake_mfsdp_bucket(bucket_id, dp_rank, dp_size, shard_size):
     )
 
 
+def test_owner_compute_scatter_pack_matches_flat_rank_shards_cpu():
+    def chunk(shape, offset):
+        shape = torch.Size(shape)
+        return {"shape": shape, "offset": tuple(offset), "numel": shape.numel()}
+
+    def flat_start(full_shape, chunk_info):
+        if chunk_info["numel"] == 0:
+            return 0
+        result = 0
+        stride = 1
+        for dim in range(len(full_shape) - 1, -1, -1):
+            result += chunk_info["offset"][dim] * stride
+            stride *= full_shape[dim]
+        return result
+
+    def chunks_are_contiguous_full_order(full_shape, chunk_infos):
+        cursor = 0
+        for chunk_info in chunk_infos:
+            if chunk_info["numel"] == 0:
+                continue
+            if flat_start(full_shape, chunk_info) != cursor:
+                return False
+            cursor += chunk_info["numel"]
+        return cursor == torch.Size(full_shape).numel()
+
+    def plan(full_shape, chunk_infos):
+        full_shape = torch.Size(full_shape)
+        sorted_ranks = sorted(
+            range(len(chunk_infos)), key=lambda rank: flat_start(full_shape, chunk_infos[rank])
+        )
+        return {
+            "flat_rank_numels": [info["numel"] for info in chunk_infos],
+            "flat_chunk_infos": chunk_infos,
+            "flat_sorted_rank_indices": sorted_ranks,
+            "flat_sorted_is_contiguous_full_order": chunks_are_contiguous_full_order(
+                full_shape, [chunk_infos[rank] for rank in sorted_ranks]
+            ),
+        }
+
+    optimizer = object.__new__(FSDPTensorParallelMuon)
+    optimizer.fsdp_owner_compute_scatter_flat_scatter_copy = True
+    optimizer.fsdp_fast_reconstruct = True
+
+    group_size = 4
+    plans = [
+        plan(
+            (7, 3),
+            [
+                chunk((2, 3), (0, 0)),
+                chunk((3, 3), (2, 0)),
+                chunk((2, 3), (5, 0)),
+                chunk((0, 3), (7, 0)),
+            ],
+        ),
+        plan(
+            (4, 6),
+            [
+                chunk((2, 3), (0, 0)),
+                chunk((2, 3), (0, 3)),
+                chunk((2, 3), (2, 0)),
+                chunk((2, 3), (2, 3)),
+            ],
+        ),
+        plan(
+            (5, 2),
+            [
+                chunk((0, 2), (0, 0)),
+                chunk((2, 2), (0, 0)),
+                chunk((1, 2), (2, 0)),
+                chunk((2, 2), (3, 0)),
+            ],
+        ),
+        plan(
+            (3, 2),
+            [
+                chunk((1, 2), (0, 0)),
+                chunk((1, 2), (1, 0)),
+                chunk((1, 2), (2, 0)),
+                chunk((0, 2), (3, 0)),
+            ],
+        ),
+    ]
+    owners = [2, 0, 2, 1]
+    full_updates = [
+        torch.arange(torch.Size(shape).numel(), dtype=torch.float32).view(shape) + 100 * idx
+        for idx, shape in enumerate([(7, 3), (4, 6), (5, 2), (3, 2)])
+    ]
+
+    source_buffers = {}
+    for source_rank in range(group_size):
+        send_counts = [0] * group_size
+        for owner, flat_plan in zip(owners, plans):
+            if owner != source_rank:
+                continue
+            for rank, rank_numel in enumerate(flat_plan["flat_rank_numels"]):
+                send_counts[rank] += rank_numel
+
+        send = torch.full((sum(send_counts),), -1.0, dtype=torch.float32)
+        send_offsets = [0] * group_size
+        cursor = 0
+        for rank, count in enumerate(send_counts):
+            send_offsets[rank] = cursor
+            cursor += count
+        send_cursors = send_offsets.copy()
+
+        for owner, flat_plan, full_update in zip(owners, plans, full_updates):
+            if owner != source_rank:
+                continue
+            if optimizer._try_copy_flat_ordered_full_update_to_scatter_send(
+                full_update, flat_plan, send, send_cursors, full_update.dtype
+            ):
+                continue
+            for rank, rank_numel in enumerate(flat_plan["flat_rank_numels"]):
+                if rank_numel == 0:
+                    continue
+                shard = optimizer._flat_rank_shard_from_full_update(full_update, flat_plan, rank)
+                offset = send_cursors[rank]
+                send[offset : offset + rank_numel].copy_(shard)
+                send_cursors[rank] += rank_numel
+
+        assert send_cursors == [offset + count for offset, count in zip(send_offsets, send_counts)]
+        source_buffers[source_rank] = (send, send_counts, send_offsets)
+
+    for dest_rank in range(group_size):
+        recv_counts = [0] * group_size
+        for owner, flat_plan in zip(owners, plans):
+            recv_counts[owner] += flat_plan["flat_rank_numels"][dest_rank]
+
+        recv_segments = []
+        for source_rank in range(group_size):
+            send, send_counts, send_offsets = source_buffers[source_rank]
+            assert send_counts[dest_rank] == recv_counts[source_rank]
+            start = send_offsets[dest_rank]
+            recv_segments.append(send[start : start + send_counts[dest_rank]])
+        recv = torch.cat(recv_segments) if recv_segments else torch.empty(0)
+
+        recv_offsets = [0] * group_size
+        cursor = 0
+        for rank, count in enumerate(recv_counts):
+            recv_offsets[rank] = cursor
+            cursor += count
+        recv_cursors = recv_offsets.copy()
+
+        for owner, flat_plan, full_update in zip(owners, plans, full_updates):
+            local_numel = flat_plan["flat_rank_numels"][dest_rank]
+            if local_numel == 0:
+                continue
+            offset = recv_cursors[owner]
+            received = recv[offset : offset + local_numel]
+            recv_cursors[owner] += local_numel
+            expected = optimizer._flat_rank_shard_from_full_update(
+                full_update, flat_plan, dest_rank
+            )
+            torch.testing.assert_close(received, expected, atol=0, rtol=0)
+
+        assert recv_cursors == [offset + count for offset, count in zip(recv_offsets, recv_counts)]
+
+
 class TestGetMFSDPModels:
     def test_error_on_plain_module(self):
         with pytest.raises(RuntimeError, match="Could not find any MegatronFSDP"):
