@@ -2230,6 +2230,104 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return None
         return partition_dim
 
+    def _blockwise_tp_partition_dim_for_param(self, p: torch.Tensor) -> int | None:
+        if self.tp_mode != "blockwise":
+            return None
+        partition_dim = getattr(p, "partition_dim", None)
+        if partition_dim is None or partition_dim == -1:
+            return None
+        tp_group = self._tp_group_for_param(p)
+        if tp_group is None or get_pg_size(tp_group) <= 1:
+            return None
+        return int(partition_dim)
+
+    def _tp_group_for_param(self, p: torch.Tensor) -> torch.distributed.ProcessGroup | None:
+        if self.pg_collection is None:
+            return None
+        return (
+            self.pg_collection.expt_tp if getattr(p, "expert_tp", False) else self.pg_collection.tp
+        )
+
+    def _orthogonalize_duplicated_tp_full_tensor(
+        self, p: torch.Tensor, full_pre_ns_grad: torch.Tensor, group_kwargs: dict[str, Any]
+    ) -> torch.Tensor | None:
+        """Orthogonalize an already TP-gathered tensor without another TP gather."""
+        if self.tp_mode != "duplicated":
+            return None
+
+        partition_dim = self._tp_partition_dim_for_param(p)
+        if partition_dim is None or partition_dim < 0:
+            return None
+        if partition_dim >= full_pre_ns_grad.ndim:
+            raise AssertionError(
+                "Muon+M-FSDP TP partition dimension is incompatible with gathered tensor: "
+                f"partition_dim={partition_dim}, shape={tuple(full_pre_ns_grad.shape)}."
+            )
+
+        tp_group = self._tp_group_for_param(p)
+        if tp_group is None:
+            return None
+        tp_size = get_pg_size(tp_group)
+        if tp_size <= 1:
+            return None
+
+        full_dim = int(full_pre_ns_grad.shape[partition_dim])
+        if full_dim % tp_size != 0:
+            raise AssertionError(
+                "Muon+M-FSDP gathered TP dimension is not evenly divisible by TP size: "
+                f"shape={tuple(full_pre_ns_grad.shape)}, partition_dim={partition_dim}, "
+                f"tp_size={tp_size}."
+            )
+
+        missing = object()
+        old_partition_dim = getattr(p, "partition_dim", missing)
+        try:
+            setattr(p, "partition_dim", -1)
+            return super(FSDPTensorParallelMuon, self).orthogonalize(
+                p, full_pre_ns_grad, **group_kwargs
+            )
+        finally:
+            if old_partition_dim is missing:
+                try:
+                    delattr(p, "partition_dim")
+                except AttributeError:
+                    pass
+            else:
+                setattr(p, "partition_dim", old_partition_dim)
+
+    def _orthogonalize_blockwise_tp_full_tensor(
+        self, p: torch.Tensor, full_pre_ns_grad: torch.Tensor, group_kwargs: dict[str, Any]
+    ) -> torch.Tensor | None:
+        """Match 3-D-parallel blockwise TP Muon on a tensor with concatenated TP shards."""
+        partition_dim = self._blockwise_tp_partition_dim_for_param(p)
+        if partition_dim is None:
+            return None
+        if partition_dim < 0 or partition_dim >= full_pre_ns_grad.ndim:
+            raise AssertionError(
+                "Muon+M-FSDP blockwise TP partition dimension is incompatible with tensor: "
+                f"partition_dim={partition_dim}, shape={tuple(full_pre_ns_grad.shape)}."
+            )
+
+        tp_group = self._tp_group_for_param(p)
+        assert tp_group is not None
+        tp_size = get_pg_size(tp_group)
+        full_dim = int(full_pre_ns_grad.shape[partition_dim])
+        if full_dim % tp_size != 0:
+            raise AssertionError(
+                "Muon+M-FSDP blockwise TP tensor dimension is not divisible by TP size: "
+                f"shape={tuple(full_pre_ns_grad.shape)}, partition_dim={partition_dim}, "
+                f"tp_size={tp_size}."
+            )
+
+        orth_chunks = []
+        for chunk in full_pre_ns_grad.chunk(tp_size, dim=partition_dim):
+            orth_chunks.append(
+                super(FSDPTensorParallelMuon, self).orthogonalize(
+                    p, chunk.contiguous(), **group_kwargs
+                )
+            )
+        return torch.cat(orth_chunks, dim=partition_dim).contiguous()
+
     def _fsdp_batched_ns_key(
         self, p: torch.Tensor, pre_ns_grad: torch.Tensor | None, update_mode: str
     ) -> tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype, torch.device] | None:
@@ -2253,9 +2351,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             and update_mode == "local_boundary"
             and self.fsdp_batched_unsplit_qkv_local_boundary
         )
-        if (is_split_qkv and not allow_unsplit_qkv) or self._tp_partition_dim_for_param(
-            p
-        ) is not None:
+        if (
+            (is_split_qkv and not allow_unsplit_qkv)
+            or self._tp_partition_dim_for_param(p) is not None
+            or self._blockwise_tp_partition_dim_for_param(p) is not None
+        ):
             return None
         scale_shape: tuple[int, ...] = ()
         if update_mode == "local_boundary" and self.fsdp_approx_local_boundary_full_shape_scale:
@@ -2283,7 +2383,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return None
         if p.numel() > self.fsdp_batched_newton_schulz_max_numel:
             return None
-        if self._is_split_qkv_param(p) or self._tp_partition_dim_for_param(p) is not None:
+        if (
+            self._is_split_qkv_param(p)
+            or self._tp_partition_dim_for_param(p) is not None
+            or self._blockwise_tp_partition_dim_for_param(p) is not None
+        ):
             return None
         return (update_mode, tuple(p.shape), (), reference_tensor.dtype, reference_tensor.device)
 
@@ -2716,9 +2820,13 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 )
                 full_pre_ns = self._restore_boundary_gather_tensor(full_pre_ns, pre_ns_grad)
                 assert full_pre_ns is not None
-                full_update = super(FSDPTensorParallelMuon, self).orthogonalize(
-                    p, full_pre_ns, **group_kwargs
+                full_update = self._orthogonalize_blockwise_tp_full_tensor(
+                    p, full_pre_ns, group_kwargs
                 )
+                if full_update is None:
+                    full_update = super(FSDPTensorParallelMuon, self).orthogonalize(
+                        p, full_pre_ns, **group_kwargs
+                    )
                 if self._try_copy_flat_ordered_full_update_to_scatter_send(
                     full_update, flat_plan, scatter_send, scatter_send_cursors, param_dtype
                 ):
@@ -2966,7 +3074,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return None
         if pre_ns_grad.ndim != 2:
             return None
-        if self._is_split_qkv_param(p) or self._tp_partition_dim_for_param(p) is not None:
+        if (
+            self._is_split_qkv_param(p)
+            or self._tp_partition_dim_for_param(p) is not None
+            or self._blockwise_tp_partition_dim_for_param(p) is not None
+        ):
             return None
         fsdp_group = self._get_fsdp_distributed_ns_group(p)
         if fsdp_group is None:
@@ -3011,7 +3123,10 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return None
         if not self._is_split_qkv_param(p) or self.qkv_split_shapes is None:
             return None
-        if self._tp_partition_dim_for_param(p) is not None:
+        if (
+            self._tp_partition_dim_for_param(p) is not None
+            or self._blockwise_tp_partition_dim_for_param(p) is not None
+        ):
             return None
         if pre_ns_grad.ndim != 2 or pre_ns_grad.numel() == 0:
             return None
@@ -3054,7 +3169,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
             return None
         if p_local.numel() > self.fsdp_batched_newton_schulz_max_numel:
             return None
-        if self._is_split_qkv_param(p) or self._tp_partition_dim_for_param(p) is not None:
+        if (
+            self._is_split_qkv_param(p)
+            or self._tp_partition_dim_for_param(p) is not None
+            or self._blockwise_tp_partition_dim_for_param(p) is not None
+        ):
             return None
         mom_local = self.state[p]["momentum_buffer"]._local_tensor
         grad = self._param_grad(p)
@@ -4154,6 +4273,8 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                 return "too_large"
             if self._tp_partition_dim_for_param(p) is not None:
                 return "tp_partition"
+            if self._blockwise_tp_partition_dim_for_param(p) is not None:
+                return "blockwise_tp_partition"
             if self._is_split_qkv_param(p):
                 return "qkv_unbatched"
             return "other"
@@ -4438,12 +4559,18 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         if update_mode == "gather":
             if pre_ns_grad is None:
                 return
-            with torch.autograd.profiler.record_function(
-                f"Muon-FSDP individual NS/update mode=gather shape={tuple(pre_ns_grad.shape)}"
-            ):
-                orth_update = super(FSDPTensorParallelMuon, self).orthogonalize(
-                    p, pre_ns_grad, **group_kwargs
+            orth_update = self._orthogonalize_blockwise_tp_full_tensor(p, pre_ns_grad, group_kwargs)
+            if orth_update is None:
+                orth_update = self._orthogonalize_duplicated_tp_full_tensor(
+                    p, pre_ns_grad, group_kwargs
                 )
+            if orth_update is None:
+                with torch.autograd.profiler.record_function(
+                    f"Muon-FSDP individual NS/update mode=gather shape={tuple(pre_ns_grad.shape)}"
+                ):
+                    orth_update = super(FSDPTensorParallelMuon, self).orthogonalize(
+                        p, pre_ns_grad, **group_kwargs
+                    )
             self._apply_orthogonal_muon_update(p, orth_update, update_mode, lr)
             return
 
