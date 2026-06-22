@@ -4896,6 +4896,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         "Muon-FSDP direct boundary stack ready wait"
                     ):
                         torch.cuda.current_stream(stacked_pre_ns.device).wait_event(ready_event)
+                self._record_tensor_on_current_cuda_stream(stacked_pre_ns)
                 with torch.autograd.profiler.record_function(
                     "Muon-FSDP direct boundary batched NS/update "
                     f"shape={shape} count={len(chunk)}"
@@ -4930,9 +4931,11 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
                         continue
                     update_idx = boundary_update_indices[item_idx]
                     p, local_pre_ns_grad, _, lr, group_kwargs = all_updates[update_idx]
+                    self._record_tensor_on_current_cuda_stream(gathered_boundary_updates[item_idx])
                     gathered_pre_ns_grad = self._restore_boundary_gather_tensor(
                         gathered_boundary_updates[item_idx], local_pre_ns_grad
                     )
+                    self._record_tensor_on_current_cuda_stream(gathered_pre_ns_grad)
                     completed_updates.append((p, gathered_pre_ns_grad, "gather", lr, group_kwargs))
                     gathered_boundary_updates[item_idx] = None
                     processed_item_indices.add(item_idx)
@@ -7099,6 +7102,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         if comm_stream is not None and batch["device"].type == "cuda":
             with torch.cuda.device(batch["device"]):
                 with torch.cuda.stream(comm_stream):
+                    self._block_or_wait_uneven_gather_stage_on_current_stream(pending_stage)
                     reconstruct_payloads()
                     ready_event = torch.cuda.Event()
                     ready_event.record(comm_stream)
@@ -7461,6 +7465,18 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         block_current_stream()
         return True
 
+    def _block_or_wait_uneven_gather_stage_on_current_stream(
+        self, pending_stage: dict[str, Any]
+    ) -> None:
+        if self._block_current_stream_on_uneven_gather_stage(pending_stage):
+            return
+        self._wait_uneven_gather_stage(pending_stage)
+
+    def _record_tensor_on_current_cuda_stream(self, tensor: torch.Tensor | None) -> None:
+        if tensor is None or tensor.device.type != "cuda":
+            return
+        tensor.record_stream(torch.cuda.current_stream(tensor.device))
+
     def _overlap_gather_pending_completed(self, pending: dict[str, Any]) -> bool:
         def stage_completed(pending_stage: dict[str, Any]) -> bool:
             work = pending_stage.get("work")
@@ -7737,6 +7753,7 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
         if comm_stream is not None and batch["device"].type == "cuda":
             with torch.cuda.device(batch["device"]):
                 with torch.cuda.stream(comm_stream):
+                    self._block_or_wait_uneven_gather_stage_on_current_stream(pending_stage)
                     reconstruct_payloads()
                     ready_event = torch.cuda.Event()
                     ready_event.record(comm_stream)
