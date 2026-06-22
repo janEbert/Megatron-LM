@@ -70,6 +70,10 @@ def calc_params_l2_norm(model, force_create_fp32_copy=False):
                             f"Megatron FSDP requires parameters are PyTorch DTensor. "
                             f"Parameter {name} is not a DTensor."
                         )
+                    if not param_is_not_tensor_parallel_duplicate(param):
+                        continue
+                    if not param_is_not_shared(param):
+                        continue
                     params.append(param)
 
             return calc_dtensor_params_l2_norm(params)
@@ -201,49 +205,52 @@ def calc_params_l2_norm(model, force_create_fp32_copy=False):
     return norm_2.item() ** 0.5
 
 
+def _dtensor_replica_factor(param):
+    """Return the number of rank-local copies represented by this DTensor."""
+    dtensor_spec = param._spec
+    replica_factor = 1.0
+    for mesh_dim, placement in enumerate(dtensor_spec.placements):
+        is_replicate = (
+            getattr(placement, "is_replicate", lambda: False)()
+            or type(placement).__name__ == "Replicate"
+        )
+        if not is_replicate:
+            continue
+        replica_factor *= float(
+            torch.distributed.get_world_size(
+                group=dtensor_spec.device_mesh.get_group(mesh_dim)
+            )
+        )
+    return replica_factor
+
+
 def calc_dtensor_params_l2_norm(params):
     """Calculate l2 norm of DTensor parameters."""
     with torch.autograd.profiler.record_function("M-FSDP calc dtensor params l2 norm"):
         params_data = defaultdict(list)
         for param in params:
-            params_data[param._spec].append(param._local_tensor)
+            local_tensor = param._local_tensor
+            if local_tensor.numel() == 0:
+                continue
+            correction_factor = _dtensor_replica_factor(param)
+            params_data[(correction_factor, local_tensor.dtype)].append(local_tensor)
 
         total_norm_2 = torch.zeros((1,), dtype=torch.float32, device='cuda')
         dummy_overflow_buf = torch.zeros((1,), dtype=torch.int, device='cuda')
-        for dtensor_spec, local_tensors in params_data.items():
-            local_tensors = [t for t in local_tensors if t.numel() > 0]
-            if len(local_tensors) == 0:
-                norm = torch.zeros((1,), dtype=torch.float32, device='cuda')
-            else:
-                with torch.autograd.profiler.record_function(
-                    "M-FSDP params norm multi-tensor l2"
-                ):
-                    norm, _ = multi_tensor_applier(
-                        multi_tensor_l2norm,
-                        dummy_overflow_buf,
-                        [local_tensors],
-                        False,  # no per-parameter norm.
-                    )
-            norm_2 = norm * norm
-            for pg, placement in zip(
-                dtensor_spec.device_mesh.get_all_groups(),
-                dtensor_spec.placements,
+        for (correction_factor, _dtype), local_tensors in params_data.items():
+            with torch.autograd.profiler.record_function(
+                "M-FSDP params norm multi-tensor l2"
             ):
-                if placement.is_shard():
-                    with torch.autograd.profiler.record_function(
-                        "M-FSDP params norm all-reduce"
-                    ):
-                        torch.distributed.all_reduce(
-                            norm_2, op=torch.distributed.ReduceOp.SUM, group=pg
-                        )
-                elif placement.is_replicate():
-                    # Replicated parameters are already summed across all ranks.
-                    pass
-                else:
-                    raise RuntimeError(
-                        f"Unsupported placement {placement} for Megatron FSDP."
-                    )
-            total_norm_2 += norm_2
+                norm, _ = multi_tensor_applier(
+                    multi_tensor_l2norm,
+                    dummy_overflow_buf,
+                    [local_tensors],
+                    False,  # no per-parameter norm.
+                )
+            total_norm_2 += (norm * norm) / correction_factor
+
+        with torch.autograd.profiler.record_function("M-FSDP params norm all-reduce"):
+            torch.distributed.all_reduce(total_norm_2, op=torch.distributed.ReduceOp.SUM)
 
     return total_norm_2.item() ** 0.5
 

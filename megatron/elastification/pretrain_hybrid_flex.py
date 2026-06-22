@@ -370,7 +370,7 @@ def forward_step(data_iterator, model: HybridModel):
 
     # One-time per-component params-norm breakdown (mirrors calc_params_l2_norm).
     global _logged_params_norm
-    if not _logged_params_norm:
+    if not _logged_params_norm and not getattr(args, "use_megatron_fsdp", False):
         _logged_params_norm = True
         from collections import defaultdict
         groups = defaultdict(float)
