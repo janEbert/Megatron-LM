@@ -5584,6 +5584,18 @@ class FSDPTensorParallelMuon(TensorParallelMuon):
     def _is_split_qkv_param(self, param: torch.Tensor) -> bool:
         return bool(self.split_qkv and self.is_qkv_fn is not None and self.is_qkv_fn(param))
 
+    def _qkv_split_dim_for_shape(self, shape: tuple[int, ...]) -> int | None:
+        if self.qkv_split_shapes is None or len(shape) < 2:
+            return None
+        qkv_total = sum(self.qkv_split_shapes)
+        if qkv_total <= 0:
+            return None
+        if shape[0] % qkv_total == 0:
+            return 0
+        if shape[1] % qkv_total == 0:
+            return 1
+        return None
+
     def _get_fsdp_distributed_ns_group(self, dtensor_ref) -> torch.distributed.ProcessGroup | None:
         if not self.fsdp_distributed_ns:
             return None
