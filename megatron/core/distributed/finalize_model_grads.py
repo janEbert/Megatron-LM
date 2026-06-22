@@ -32,6 +32,8 @@ from ..utils import (
 
 
 def _get_main_grad_attr(param: torch.nn.Parameter):
+    if getattr(param, "decoupled_grad", None) is not None:
+        return "decoupled_grad"
     if hasattr(param, "main_grad"):
         return "main_grad"
     return "grad"
