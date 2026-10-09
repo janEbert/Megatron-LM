@@ -22,12 +22,25 @@ import torch
 try:
     from emerging_optimizers import utils as eo_utils
     from emerging_optimizers.orthogonalized_optimizers import OrthogonalizedOptimizer
+    from emerging_optimizers.orthogonalized_optimizers.muon import Muon
 
     HAVE_EMERGING_OPTIMIZERS = True
 except (ModuleNotFoundError, ImportError):
     eo_utils = cast(Any, None)
     OrthogonalizedOptimizer = cast(Any, object)
+    Muon = cast(Any, object)
     HAVE_EMERGING_OPTIMIZERS = False
+
+# `Muon` is re-exported for `muon.py`: this module is the sole `emerging_optimizers` import site, so
+# the fallback in the `except` branch above covers it too.
+__all__ = [
+    "HAVE_EMERGING_OPTIMIZERS",
+    "Muon",
+    "OrthogonalizedOptimizer",
+    "apply_update",
+    "compute_orthogonalization_inputs",
+    "orthogonalize_owned",
+]
 
 
 def _require_emerging_optimizers() -> None:

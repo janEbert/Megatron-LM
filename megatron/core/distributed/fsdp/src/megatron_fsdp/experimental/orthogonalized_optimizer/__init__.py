@@ -4,6 +4,7 @@
 Owner-compute orthogonalized optimizers for MFSDP v2.
 """
 
+from .muon import FsdpMuon
 from .optimizer import FsdpOrthogonalizedOptimizer
 
-__all__ = ["FsdpOrthogonalizedOptimizer"]
+__all__ = ["FsdpMuon", "FsdpOrthogonalizedOptimizer"]

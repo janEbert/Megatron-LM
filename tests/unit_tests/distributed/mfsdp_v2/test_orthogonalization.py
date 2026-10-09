@@ -181,12 +181,14 @@ _EO_MOD = (
 
 def test_import_guard_emerging_optimizers_available():
     """When emerging_optimizers is installed, HAVE_EMERGING_OPTIMIZERS is True."""
+    from emerging_optimizers.orthogonalized_optimizers import Muon as RealMuon  # noqa: I001
     from emerging_optimizers.orthogonalized_optimizers import OrthogonalizedOptimizer as RealEO
 
     import megatron.core.distributed.fsdp.src.megatron_fsdp.experimental.orthogonalized_optimizer.orthogonalization as mod
 
     assert mod.HAVE_EMERGING_OPTIMIZERS is True
     assert mod.OrthogonalizedOptimizer is RealEO
+    assert mod.Muon is RealMuon
 
 
 @contextlib.contextmanager
@@ -230,3 +232,4 @@ def test_import_guard_without_emerging_optimizers():
     with _simulate_no_emerging_optimizers() as mod:
         assert mod.HAVE_EMERGING_OPTIMIZERS is False
         assert mod.OrthogonalizedOptimizer is object
+        assert mod.Muon is object
