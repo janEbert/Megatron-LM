@@ -217,6 +217,10 @@ def _simulate_no_emerging_optimizers():
         sys.modules.update(saved_eo)
         if saved_mod is not None:
             sys.modules[_EO_MOD] = saved_mod
+            # The blocked reload also rebound the parent's attribute; restore it,
+            # since `import a.b.c as mod` binds through the parent's attributes.
+            parent_name, _, leaf = _EO_MOD.rpartition(".")
+            setattr(sys.modules[parent_name], leaf, saved_mod)
         else:
             sys.modules.pop(_EO_MOD, None)
 

@@ -3,3 +3,7 @@
 """
 Owner-compute orthogonalized optimizers for MFSDP v2.
 """
+
+from .optimizer import FsdpOrthogonalizedOptimizer
+
+__all__ = ["FsdpOrthogonalizedOptimizer"]

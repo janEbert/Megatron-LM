@@ -17,7 +17,7 @@ concurrent constructions so their delete/restore phases cannot interleave.
 import contextlib
 import threading
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Generator
 from typing import Any, ClassVar
 
 import torch
@@ -76,7 +76,7 @@ class ComposedOptimizer(torch.optim.Optimizer):
         return [p for group in self.param_groups for p in group["params"]]
 
     @contextlib.contextmanager
-    def _without_property_methods(self) -> Iterator[None]:
+    def _without_property_methods(self) -> Generator[None, None, None]:
         """Temporarily remove the delegating property descriptors.
 
         The properties are data descriptors on this class (inherited by subclasses), so
